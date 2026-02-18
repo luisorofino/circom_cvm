@@ -2,6 +2,7 @@ pub mod ast;
 pub mod types;
 pub mod type_checking;
 mod cfg_construction;
+mod ssa_destruction;
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -46,16 +47,16 @@ fn replace_variable_in_expression(expr: &mut Expression, target: &str, replaceme
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct Value {
-    operator: Option<Operator>,
-    operands: Vec<Expression>,
+pub(crate) struct Value {
+    pub(crate) operator: Option<Operator>,
+    pub(crate) operands: Vec<Expression>,
 }
 
 #[derive(Clone, Serialize)]
 pub struct Statement {
-    num_type: Option<NumericType>,
-    output: Option<String>,
-    value: Value,
+    pub(crate) num_type: Option<NumericType>,
+    pub(crate) output: Option<String>,
+    pub(crate) value: Value,
 }
 
 use std::fmt;
@@ -86,14 +87,14 @@ impl fmt::Debug for Statement {
 /// The list of possibilities are the name of the ssa variable and the block where it comes from
 #[derive(Debug, Clone, Serialize)]
 pub struct PhiPossibility {
-    variable: String,
-    block: usize,
+    pub(crate) variable: String,
+    pub(crate) block: usize,
 }
 
 #[derive(Clone, Serialize)]
 pub struct PhiFunction {
-    output: String,
-    possibilities: Vec<PhiPossibility>,
+    pub(crate) output: String,
+    pub(crate) possibilities: Vec<PhiPossibility>,
 }
 
 impl fmt::Debug for PhiFunction {
@@ -122,29 +123,29 @@ pub enum Successor {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LineInstruction {
-    is_phi: bool,
-    line: usize,
+    pub(crate) is_phi: bool,
+    pub(crate) line: usize,
 }
 
 type Stack<T> = Vec<T>;
 
 #[derive(Debug, Serialize)]
 pub struct BasicBlock {
-    id: usize,
-    phi_functions: Vec<PhiFunction>,
-    statements: Vec<Statement>,
-    predecessors: Vec<usize>,
-    successors: Option<Successor>,
+    pub(crate) id: usize,
+    pub(crate) phi_functions: Vec<PhiFunction>,
+    pub(crate) statements: Vec<Statement>,
+    pub(crate) predecessors: Vec<usize>,
+    pub(crate) successors: Option<Successor>,
     ///Whether a variable is declared as a phi function and its position in the list of phi
     ///functions or statements accordingly
-    declarations: BTreeMap<String, LineInstruction>,
+    pub(crate) declarations: BTreeMap<String, LineInstruction>,
     //Necessary data for liveness analysis
     ///Set with the variables that are used in phi functions in the successors of the block
-    phi_uses: BTreeSet<String>,
+    pub(crate) phi_uses: BTreeSet<String>,
     ///Set with the variables that are live in at the beginning of the block
-    live_in: Stack<String>,
+    pub(crate) live_in: Stack<String>,
     ///Set with the variables that are live out at the end of the block
-    live_out: Stack<String>,
+    pub(crate) live_out: Stack<String>,
 }
 
 impl BasicBlock {
@@ -245,7 +246,7 @@ impl BasicBlock {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Use {
+pub(crate) enum Use {
     /// Block and line in the block
     InInstruction(usize, LineInstruction),
     /// Block whose successor is conditional successor
@@ -254,13 +255,13 @@ enum Use {
 
 #[derive(Default, Debug, Serialize)]
 pub struct CFG {
-    entry: usize,
-    blocks: Vec<BasicBlock>,
-    non_ssa_variables: usize,
+    pub(crate) entry: usize,
+    pub(crate) blocks: Vec<BasicBlock>,
+    pub(crate) non_ssa_variables: usize,
     /// Key: Variable, Value: Block and line in that block where it is defined
-    definitions: BTreeMap<String, (usize, LineInstruction)>,
+    pub(crate) definitions: BTreeMap<String, (usize, LineInstruction)>,
     /// Key: Variable, Value: Set with all its uses
-    def_use: BTreeMap<String, BTreeSet<Use>>,
+    pub(crate) def_use: BTreeMap<String, BTreeSet<Use>>,
 }
 
 impl CFG {
