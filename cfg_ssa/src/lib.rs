@@ -172,7 +172,7 @@ impl BasicBlock {
     }
 
     /// Returns the position of the new Statement
-    fn add_instruction(&mut self, stmt: Statement) -> LineInstruction {
+    pub(crate) fn add_instruction(&mut self, stmt: Statement) -> LineInstruction {
         let line = LineInstruction { is_phi: false, line: self.statements.len() };
         if let Some(output) = &stmt.output {
             self.declarations.insert(output.clone(), line.clone());

@@ -36,14 +36,14 @@ impl CFG {
                 for (_dst, src) in &copies {
                     let tmp = Self::fresh_tmp(&mut next_tmp);
                     let stmt = Self::make_copy(tmp.clone(), src.clone());
-                    self.blocks[pred_id].statements.push(stmt);
+                    self.blocks[pred_id].add_instruction(stmt);
                     tmp_names.push(tmp);
                 }
 
                 // Phase 2: copy temps into final destinations
                 for (i, (dst, _src)) in copies.iter().enumerate() {
                     let stmt = Self::make_copy(dst.clone(), tmp_names[i].clone());
-                    self.blocks[pred_id].statements.push(stmt);
+                    self.blocks[pred_id].add_instruction(stmt);
                 }
             }
 
