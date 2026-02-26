@@ -661,6 +661,12 @@ impl CFGList {
         Ok(Self { entry, cfgs })
     }
 
+    pub fn destroy_ssa_all(&mut self) {
+        for cfg in &mut self.cfgs {
+            cfg.destroy_ssa();
+        }
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap()
     }

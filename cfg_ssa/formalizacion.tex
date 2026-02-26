@@ -1,0 +1,965 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{stmaryrd}   % \llbracket, \rrbracket
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\newtheorem{definition}{Definición}[section]
+\newtheorem{theorem}{Teorema}[section]
+\newtheorem{lemma}{Lema}[section]
+\newtheorem{proposition}{Proposición}[section]
+\newtheorem{remark}{Observación}[section]
+\newtheorem{example}{Ejemplo}[section]
+
+\title{Formalización de la Destrucción de SSA en CVM\\[0.5em]
+\large Borrador inicial --- Definiciones previas}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% =========================================================
+\section{Introducción}
+% =========================================================
+
+La forma estática de asignación única (\emph{Static Single Assignment}, SSA) es una
+representación intermedia del código en la que cada variable es definida exactamente una vez.
+Esta propiedad simplifica numerosos análisis y optimizaciones de compiladores. Sin embargo, SSA
+no es directamente ejecutable: las \emph{funciones phi} ($\phi$-funciones) que aparecen en los
+puntos de convergencia del flujo de control no tienen correspondencia directa en bytecode
+convencional.
+
+El proceso de \emph{destrucción de SSA} consiste en eliminar las $\phi$-funciones y obtener un
+programa equivalente sin ellas. En este trabajo formalizamos la destrucción \emph{naive}
+implementada para el bytecode CVM: una versión sin optimizar que, pese a poder introducir copias
+redundantes, garantiza la corrección mediante el uso de variables temporales frescas.
+
+El objetivo de este documento es establecer las definiciones matemáticas necesarias para
+demostrar formalmente que el código CVM antes y después de pasar por SSA (construir y destruir)
+produce el mismo comportamiento observable. La corrección de la \emph{construcción} de SSA se
+asume como hipótesis; aquí únicamente nos interesa la \emph{destrucción}.
+
+% =========================================================
+\section{El lenguaje CVM-CFG}
+% =========================================================
+
+\subsection{Variables y valores}
+
+\begin{definition}[Variables y valores]
+Sea $\mathcal{V}$ un conjunto numerable de \emph{nombres de variable}. Sea $\mathcal{D}$ el
+\emph{dominio de valores}, que comprende enteros de 64 bits ($\mathbb{Z}_{2^{64}}$) y elementos
+de cuerpos finitos. Una \emph{valuación} es una función parcial
+$\sigma : \mathcal{V} \rightharpoonup \mathcal{D}$.
+\end{definition}
+
+\begin{definition}[Expresiones atómicas]
+Una \emph{expresión atómica} $a$ es uno de los siguientes:
+\begin{itemize}
+  \item Una constante $c \in \mathcal{D}$,
+  \item Una variable $x \in \mathcal{V}$.
+\end{itemize}
+El conjunto de expresiones atómicas se denota $\mathcal{A}$.
+\end{definition}
+
+\begin{definition}[Evaluación de una expresión atómica]
+Dada una valuación $\sigma$, la evaluación de $a \in \mathcal{A}$ se define como:
+\[
+  \llbracket a \rrbracket_\sigma =
+  \begin{cases}
+    c         & \text{si } a = c \in \mathcal{D},\\
+    \sigma(x) & \text{si } a = x \in \mathcal{V}.
+  \end{cases}
+\]
+\end{definition}
+
+\begin{definition}[Operadores]
+Sea $\Omega$ un conjunto finito de \emph{operadores} (suma, resta, multiplicación, comparaciones,
+operaciones de bits, etc.). Cada operador $\omega \in \Omega$ tiene una \emph{aridad}
+$\mathrm{ar}(\omega) \geq 0$ y una \emph{semántica}
+$\llbracket \omega \rrbracket : \mathcal{D}^{\mathrm{ar}(\omega)} \to \mathcal{D}$.
+\end{definition}
+
+\subsection{Instrucciones}
+
+\begin{definition}[Instrucción]
+\label{def:instruccion}
+Una \emph{instrucción} es una tupla $s = (\tau,\, x,\, \omega,\, \vec{a})$ donde:
+\begin{itemize}
+  \item $\tau \in \{\texttt{i64},\, \texttt{ff},\, \bot\}$ es el tipo numérico (opcional),
+  \item $x \in \mathcal{V} \cup \{\bot\}$ es la variable de salida (opcional),
+  \item $\omega \in \Omega \cup \{\bot\}$ es el operador (opcional),
+  \item $\vec{a} = (a_1, \ldots, a_n)$ es el vector de operandos, con $a_i \in \mathcal{A}$.
+\end{itemize}
+Cuando $x \neq \bot$, $\omega = \bot$ y $n = 1$, la instrucción se denomina
+\emph{instrucción de copia} y se escribe $x \leftarrow a_1$.
+\end{definition}
+
+\begin{definition}[Ejecución de una instrucción]
+\label{def:ejec-instruccion}
+La ejecución de $s = (\tau, x, \omega, \vec{a})$ sobre la valuación $\sigma$ produce:
+\[
+  \llbracket s \rrbracket_\sigma =
+  \begin{cases}
+    \sigma\bigl[x \mapsto \llbracket \omega \rrbracket\bigl(\llbracket a_1 \rrbracket_\sigma, \ldots, \llbracket a_n \rrbracket_\sigma\bigr)\bigr]
+      & \text{si } x \neq \bot \text{ y } \omega \neq \bot,\\[4pt]
+    \sigma\bigl[x \mapsto \llbracket a_1 \rrbracket_\sigma\bigr]
+      & \text{si } x \neq \bot \text{ y } \omega = \bot \text{ (copia)},\\[4pt]
+    \sigma
+      & \text{si } x = \bot \text{ (sin variable de salida)}.
+  \end{cases}
+\]
+Aquí $\sigma[x \mapsto v]$ denota la valuación que coincide con $\sigma$ en toda variable
+excepto $x$, a la que asigna el valor $v$.
+\end{definition}
+
+\begin{definition}[Ejecución de una secuencia de instrucciones]
+\label{def:ejec-secuencia}
+La ejecución de la secuencia $S = [s_1, \ldots, s_k]$ sobre $\sigma$ se define inductivamente:
+\[
+  \llbracket [\,] \rrbracket_\sigma = \sigma, \qquad
+  \llbracket [s_1, \ldots, s_k] \rrbracket_\sigma =
+    \llbracket [s_2, \ldots, s_k] \rrbracket_{\llbracket s_1 \rrbracket_\sigma}.
+\]
+Las instrucciones se ejecutan \textbf{secuencialmente}: cada instrucción ve el estado modificado
+por todas las anteriores.
+\end{definition}
+
+\subsection{Bloques básicos y grafo de flujo de control}
+
+\begin{definition}[Sucesor de un bloque]
+El \emph{sucesor} de un bloque básico es uno de los siguientes:
+\begin{itemize}
+  \item \textbf{Incondicional}: $\mathrm{uncond}(j)$, que transfiere el control al bloque $j$.
+  \item \textbf{Condicional}: $\mathrm{cond}(a, j_1, j_2)$, con $a \in \mathcal{A}$. Si
+    $\llbracket a \rrbracket_\sigma \neq 0$, el control pasa a $j_1$; en caso contrario, a $j_2$.
+  \item \textbf{Terminal}: $\bot$ (bloque final, sin sucesor).
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Bloque básico]
+\label{def:bloque}
+Un \emph{bloque básico} es una tupla
+$B = (\mathrm{id},\, \Phi,\, S,\, \mathrm{pred},\, \mathrm{succ})$ donde:
+\begin{itemize}
+  \item $\mathrm{id} \in \mathbb{N}$ es el identificador único del bloque,
+  \item $\Phi = [\phi_1, \ldots, \phi_m]$ es la lista (posiblemente vacía) de $\phi$-funciones,
+  \item $S = [s_1, \ldots, s_k]$ es la secuencia de instrucciones,
+  \item $\mathrm{pred} \subseteq \mathbb{N}$ es el conjunto de identificadores de predecesores,
+  \item $\mathrm{succ}$ es el sucesor del bloque.
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Grafo de flujo de control (CFG)]
+\label{def:cfg}
+Un \emph{grafo de flujo de control} (CFG) es un par $G = (\mathcal{B},\, \mathrm{entry})$ donde:
+\begin{itemize}
+  \item $\mathcal{B} = [B_0, B_1, \ldots, B_{n-1}]$ es una lista indexada de bloques básicos,
+  \item $\mathrm{entry} \in \mathbb{N}$ es el identificador del bloque de entrada.
+\end{itemize}
+La relación de aristas del grafo está determinada por los sucesores: existe una arista $(i, j)$
+si y solo si $j$ aparece en $\mathrm{succ}(B_i)$.
+
+Dado un bloque $B_j$, sus \emph{predecesores} son $\mathrm{pred}(B_j) = \{i \mid (i,j) \in E\}$,
+consistente con el campo $\mathrm{pred}$ de la Definición~\ref{def:bloque}.
+\end{definition}
+
+\begin{definition}[Programa CVM (forma no-SSA)]
+Un \emph{programa CVM} es un CFG $G = (\mathcal{B},\, \mathrm{entry})$ en el que todos los
+bloques tienen $\Phi = [\,]$ (sin $\phi$-funciones). Las instrucciones pueden asignar múltiples
+veces a la misma variable.
+\end{definition}
+
+% =========================================================
+\section{Forma SSA}
+% =========================================================
+
+\subsection{La propiedad SSA}
+
+\begin{definition}[Forma SSA]
+\label{def:ssa}
+Un CFG $G = (\mathcal{B},\, \mathrm{entry})$ está en \emph{forma SSA} si cada variable
+$x \in \mathcal{V}$ aparece como variable de salida en \emph{a lo sumo una} instrucción o
+$\phi$-función en todo el grafo.
+
+Formalmente, para todo $x \in \mathcal{V}$:
+\[
+  \bigl|\{B_j \in \mathcal{B} \mid \exists\, s \in S_j : \mathrm{out}(s) = x\}\bigr|
+  +
+  \bigl|\{B_j \in \mathcal{B} \mid \exists\, \phi \in \Phi_j : \mathrm{out}(\phi) = x\}\bigr|
+  \leq 1,
+\]
+donde $\mathrm{out}(s)$ (resp. $\mathrm{out}(\phi)$) denota la variable de salida de $s$ (resp.
+$\phi$), si existe.
+\end{definition}
+
+\begin{remark}
+En la implementación, las variables SSA se nombran $v000, v001, v002, \ldots$ y provienen de
+renombrar las variables originales del programa CVM (que pueden ser $x$, $y$, $z$, etc.). Cada
+nueva definición de una variable original genera un nombre SSA fresco. La función
+$\rho : \mathcal{V}_{\mathrm{SSA}} \to \mathcal{V}_{\mathrm{orig}}$ que asigna a cada nombre SSA
+su nombre original se construye durante la fase de renombramiento.
+\end{remark}
+
+\subsection{Funciones phi}
+
+\begin{definition}[$\phi$-función]
+\label{def:phi}
+Una \emph{$\phi$-función} en un bloque $B_j$ con predecesores $\mathrm{pred}(B_j) = \{p_1,\ldots,p_r\}$ es una tupla
+\[
+  \phi = \Bigl(x,\; \bigl[(y_1, p_1),\, \ldots,\, (y_r, p_r)\bigr]\Bigr)
+\]
+donde $x \in \mathcal{V}_{\mathrm{SSA}}$ es la variable definida y $(y_i, p_i)$ indica que si el
+control llega a $B_j$ desde el predecesor $p_i$, entonces $x$ toma el valor de la variable $y_i$.
+
+Usaremos la notación $\phi.\mathrm{out} = x$ y $\phi.\mathrm{arg}(p_i) = y_i$.
+\end{definition}
+
+\begin{remark}
+Las $\phi$-funciones se sitúan siempre al \emph{inicio} del bloque, antes de cualquier
+instrucción ordinaria. Esta posición es convencional: en la semántica, las $\phi$-funciones de
+un bloque se ejecutan \emph{simultáneamente} al entrar en él, con la semántica de copia paralela
+que se define a continuación.
+\end{remark}
+
+\subsection{Semántica de copia paralela}
+
+La semántica fundamental de las $\phi$-funciones es que todas se evalúan \textbf{al mismo tiempo}:
+los valores fuente se leen en la valuación \emph{previa a cualquier modificación}, y solo
+entonces se escriben los destinos. Esto es lo que se llama \emph{semántica de copia paralela},
+en contraste con la \emph{semántica secuencial} de las instrucciones ordinarias.
+
+\begin{definition}[Ejecución paralela de $\phi$-funciones]
+\label{def:ejec-phi}
+Sea $B_j$ un bloque con $\Phi_j = [\phi_1, \ldots, \phi_m]$, donde
+$\phi_i = (x_i, [(y_i^{p_1}, p_1), \ldots, (y_i^{p_r}, p_r)])$.
+Sea $p \in \mathrm{pred}(B_j)$ el bloque predecesor desde el que se llega a $B_j$.
+
+La \emph{ejecución paralela} de $\Phi_j$ con predecesor $p$ sobre la valuación $\sigma$ produce:
+\[
+  \llbracket \Phi_j \rrbracket_{\sigma,\, p}
+  = \sigma\Bigl[x_1 \mapsto \sigma(y_1^p),\; x_2 \mapsto \sigma(y_2^p),\; \ldots,\; x_m \mapsto \sigma(y_m^p)\Bigr]
+\]
+donde \textbf{todos} los valores $\sigma(y_i^p)$ se evalúan en la valuación \emph{original}
+$\sigma$, antes de modificar ningún $x_i$.
+\end{definition}
+
+\begin{remark}
+La diferencia con la ejecución secuencial es crucial. Compárese con la ejecución secuencial de
+las asignaciones $x_1 \leftarrow y_1^p;\; x_2 \leftarrow y_2^p;\; \ldots$: en la ejecución
+secuencial, $y_2^p$ se evaluaría en la valuación que ya incluye la modificación de $x_1$. En la
+ejecución paralela, ambos lados se evalúan en $\sigma$.
+\end{remark}
+
+% =========================================================
+\section{Semántica operacional del CFG}
+% =========================================================
+
+\subsection{Estado de ejecución y trazas}
+
+\begin{definition}[Configuración de ejecución]
+\label{def:configuracion}
+Una \emph{configuración de ejecución} del CFG $G$ es un triple
+$(\sigma,\, j,\, p)$ donde:
+\begin{itemize}
+  \item $\sigma : \mathcal{V} \rightharpoonup \mathcal{D}$ es la valuación actual,
+  \item $j \in \mathbb{N}$ es el identificador del bloque que se va a ejecutar a continuación,
+  \item $p \in \mathbb{N} \cup \{\bot\}$ es el identificador del bloque predecesor inmediato
+    ($p = \bot$ si $j = \mathrm{entry}$).
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Siguiente configuración]
+\label{def:siguiente}
+Sea $B_j = (\mathrm{id},\, \Phi_j,\, S_j,\, \mathrm{pred}_j,\, \mathrm{succ}_j)$ un bloque y
+$(\sigma, j, p)$ una configuración. La \emph{ejecución de $B_j$} transforma la configuración
+del siguiente modo:
+\begin{enumerate}
+  \item \textbf{Ejecución paralela de $\phi$-funciones:}
+    $\sigma_1 = \llbracket \Phi_j \rrbracket_{\sigma,\, p}$
+    \quad (con $\sigma_1 = \sigma$ si $\Phi_j = [\,]$ o $p = \bot$).
+  \item \textbf{Ejecución secuencial de instrucciones:}
+    $\sigma_2 = \llbracket S_j \rrbracket_{\sigma_1}$.
+  \item \textbf{Determinación del siguiente bloque:}
+    \[
+      \mathrm{next}(j, \sigma_2) =
+      \begin{cases}
+        j' & \text{si } \mathrm{succ}_j = \mathrm{uncond}(j'),\\[3pt]
+        j_1 & \text{si } \mathrm{succ}_j = \mathrm{cond}(a, j_1, j_2)
+              \text{ y } \llbracket a \rrbracket_{\sigma_2} \neq 0,\\[3pt]
+        j_2 & \text{si } \mathrm{succ}_j = \mathrm{cond}(a, j_1, j_2)
+              \text{ y } \llbracket a \rrbracket_{\sigma_2} = 0.
+      \end{cases}
+    \]
+\end{enumerate}
+La configuración resultante es $(\sigma_2,\; \mathrm{next}(j, \sigma_2),\; j)$.
+\end{definition}
+
+\begin{definition}[Traza de ejecución]
+\label{def:traza}
+Una \emph{traza de ejecución} del CFG $G = (\mathcal{B}, \mathrm{entry})$ a partir de la
+valuación inicial $\sigma_0$ es una secuencia (finita o infinita) de configuraciones:
+\[
+  \pi = (\sigma_0,\, \mathrm{entry},\, \bot) \;\to\;
+        (\sigma_1,\, j_1,\, \mathrm{entry}) \;\to\;
+        (\sigma_2,\, j_2,\, j_1) \;\to\; \cdots
+\]
+donde cada transición $(\sigma_n,\, j_n,\, p_n) \to (\sigma_{n+1},\, j_{n+1},\, p_{n+1})$
+se obtiene aplicando la Definición~\ref{def:siguiente} al bloque $B_{j_n}$.
+
+La secuencia de bloques $j_0 = \mathrm{entry},\, j_1,\, j_2,\, \ldots$ se denomina el
+\emph{camino de ejecución} de $\pi$.
+\end{definition}
+
+% =========================================================
+\section{El algoritmo de destrucción de SSA naive}
+% =========================================================
+
+\subsection{Motivación: semántica paralela vs.\ secuencial}
+
+Las $\phi$-funciones tienen semántica de copia paralela (Definición~\ref{def:ejec-phi}), pero
+el código ejecutable solo dispone de instrucciones con semántica secuencial
+(Definición~\ref{def:ejec-secuencia}). El reto de la destrucción de SSA es reemplazar las
+$\phi$-funciones por instrucciones de copia ordinarias sin alterar la semántica.
+
+\begin{example}[El problema del intercambio]
+\label{ex:swap}
+Considérese el siguiente fragmento de código sin SSA con dos ramas que convergen:
+
+\begin{verbatim}
+// rama p1:          // rama p2:
+a = 1                a = 10
+b = 2                b = 20
+goto Bj              goto Bj
+
+// bloque Bj (join):
+swap(a, b)   -- queremos que a tome el valor de b y viceversa
+\end{verbatim}
+
+En SSA, las asignaciones de \texttt{a} y \texttt{b} reciben nombres únicos
+y el intercambio en $B_j$ se expresa con $\phi$-funciones:
+
+\begin{verbatim}
+// rama p1:          // rama p2:
+a1 = 1               a2 = 10
+b1 = 2               b2 = 20
+goto Bj              goto Bj
+
+// bloque Bj:
+a3 = phi(b1 : p1,  b2 : p2)   -- a3 toma el valor de b
+b3 = phi(a1 : p1,  a2 : p2)   -- b3 toma el valor de a
+\end{verbatim}
+
+Nótese que un bloque con $\phi$-funciones tiene necesariamente \emph{dos o más} predecesores:
+con un único predecesor no hay confluencia de flujos y no se genera ninguna $\phi$-función.
+
+La ejecución paralela de las $\phi$-funciones es correcta: ambas leen el estado
+$\sigma$ \emph{antes} de que ninguna escriba, de modo que $a_3 \leftarrow \sigma(b_1)$
+y $b_3 \leftarrow \sigma(a_1)$ simultáneamente.
+
+Si se intenta sustituir naïvemente las $\phi$-funciones por copias secuenciales
+al final del predecesor $p_1$:
+\[
+  a_3 \leftarrow b_1;\quad b_3 \leftarrow a_1,
+\]
+el resultado es incorrecto: en este caso concreto las copias son independientes
+(los nombres $a_3$, $b_3$, $a_1$, $b_1$ son todos distintos) y no hay problema.
+El problema surge cuando las variables de salida de las $\phi$-funciones coinciden
+con las variables de entrada de otras $\phi$-funciones del mismo bloque, es decir,
+cuando existe un \emph{ciclo} en el grafo de dependencias de la copia paralela.
+
+Por ejemplo, si tras una fase de coalescencia $a_3$ se renombra a $a_1$ y $b_3$ a $b_1$,
+el bloque $B_j$ quedaría:
+\[
+  a_1 \leftarrow \phi(b_1 : p_1,\; b_2 : p_2),\qquad
+  b_1 \leftarrow \phi(a_1 : p_1,\; a_2 : p_2),
+\]
+y la sustitución secuencial en $p_1$:
+\[
+  a_1 \leftarrow b_1;\quad b_1 \leftarrow a_1
+\]
+es incorrecta: cuando se ejecuta $b_1 \leftarrow a_1$, la variable $a_1$ ya ha sido
+sobreescrita con el valor original de $b_1$, perdiendo el valor original de $a_1$.
+\end{example}
+
+\subsection{Variables temporales frescas}
+
+\begin{definition}[Variables temporales frescas]
+\label{def:frescas}
+Un conjunto de variables $\mathcal{T} = \{t_0, t_1, t_2, \ldots\} \subset \mathcal{V}$ es
+\emph{fresco} con respecto a un CFG $G$ si ninguna variable de $\mathcal{T}$ aparece como
+variable de salida ni como operando en ninguna instrucción o $\phi$-función de $G$.
+\end{definition}
+
+\subsection{Descripción formal del algoritmo}
+
+\begin{definition}[Destrucción naive de SSA]
+\label{def:destruccion}
+Sea $G = (\mathcal{B}, \mathrm{entry})$ un CFG en forma SSA.
+Sea $\mathcal{T} = \{t_0, t_1, \ldots\}$ un conjunto de variables frescas respecto a $G$,
+con un contador global $k$ inicializado a $0$.
+
+El algoritmo de \emph{destrucción naive} construye el CFG $G' = (\mathcal{B}', \mathrm{entry})$
+como sigue:
+
+\begin{enumerate}
+  \item Para cada bloque $B_j \in \mathcal{B}$ con lista de $\phi$-funciones
+    $\Phi_j = [\phi_1, \ldots, \phi_m]$ (donde $\phi_i.\mathrm{out} = x_i$):
+
+    \begin{enumerate}
+      \item Para cada predecesor $p \in \mathrm{pred}(B_j)$:
+        \begin{enumerate}
+          \item Sea $y_i = \phi_i.\mathrm{arg}(p)$ para $i = 1, \ldots, m$.
+
+          \item \textbf{Fase 1} --- leer fuentes en temporales: añadir al final de $B_p$
+            las instrucciones de copia:
+            \[
+              t_k \leftarrow y_1, \quad t_{k+1} \leftarrow y_2, \quad \ldots,
+              \quad t_{k+m-1} \leftarrow y_m.
+            \]
+
+          \item \textbf{Fase 2} --- copiar temporales a destinos: añadir al final de $B_p$,
+            tras la fase 1:
+            \[
+              x_1 \leftarrow t_k, \quad x_2 \leftarrow t_{k+1}, \quad \ldots,
+              \quad x_m \leftarrow t_{k+m-1}.
+            \]
+
+          \item Incrementar $k \leftarrow k + m$.
+        \end{enumerate}
+    \end{enumerate}
+
+  \item Para cada bloque $B_j \in \mathcal{B}$, vaciar su lista de $\phi$-funciones:
+    $\Phi_j' = [\,]$.
+
+  \item El resto de los campos de cada bloque permanecen inalterados:
+    $S_j' = S_j$, $\mathrm{pred}_j' = \mathrm{pred}_j$, $\mathrm{succ}_j' = \mathrm{succ}_j$.
+\end{enumerate}
+\end{definition}
+
+\begin{remark}
+Las instrucciones añadidas en las fases 1 y 2 se insertan \emph{al final} del bloque predecesor
+$B_p$, antes del salto al sucesor. En particular, el sucesor $\mathrm{succ}(B_p)$ no cambia.
+\end{remark}
+
+\begin{remark}
+La razón por la que el uso de variables temporales frescas es correcto puede verse
+intuitivamente así: en la fase 1, los valores $y_1, \ldots, y_m$ se leen en la valuación
+anterior a cualquier modificación de las variables $x_1, \ldots, x_m$ (puesto que los $t_i$
+son frescos, la lectura de $y_i$ no puede verse afectada por las escrituras previas de la fase
+1). En la fase 2, los valores leídos se escriben en los destinos finales. El conjunto de
+escrituras de la fase 2 no interfiere con las lecturas de la fase 1 porque estas ya han
+terminado. Esto emula exactamente la semántica paralela de la Definición~\ref{def:ejec-phi}.
+\end{remark}
+
+\begin{example}[Resolución del ejemplo~\ref{ex:swap}]
+Para el caso de intercambio $x_1 \leftarrow \phi(y_2:p)$ y $x_2 \leftarrow \phi(y_1:p)$, el
+algoritmo añade en $B_p$:
+\[
+  \underbrace{t_0 \leftarrow y_2;\quad t_1 \leftarrow y_1}_{\text{fase 1}};\quad
+  \underbrace{x_1 \leftarrow t_0;\quad x_2 \leftarrow t_1}_{\text{fase 2}}.
+\]
+La ejecución secuencial de estas cuatro copias produce el mismo resultado que la copia paralela
+original: $x_1$ obtiene el valor (antiguo) de $y_2$ y $x_2$ obtiene el valor (antiguo) de
+$y_1$.
+\end{example}
+
+% =========================================================
+\section{Enunciado de corrección (sin demostración)}
+% =========================================================
+
+\subsection{Relación entre variables SSA y variables originales}
+
+\begin{definition}[Función de des-renombramiento]
+\label{def:rho}
+Sea $G$ el CFG en forma SSA obtenido a partir de un programa CVM $P$. La \emph{función de
+des-renombramiento} $\rho : \mathcal{V}_{\mathrm{SSA}} \to \mathcal{V}_{\mathrm{orig}}$ asigna
+a cada nombre SSA $v_i$ el nombre original $x$ del que proviene.
+
+Dado un camino de ejecución $j_0, j_1, \ldots, j_n$ en $G$ y una valuación $\sigma_n$ al
+final del bloque $B_{j_n}$, definimos la \emph{valuación proyectada} sobre variables originales:
+\[
+  \bar\sigma_n(x) = \sigma_n(v)
+  \qquad \text{donde } v \text{ es la (única) variable SSA con } \rho(v) = x
+  \text{ activa al final de } B_{j_n}.
+\]
+\end{definition}
+
+\begin{remark}
+La noción de ``variable SSA activa al final de $B_{j_n}$'' requiere precisión formal adicional,
+que se completará usando la información de vivacidad (\emph{liveness}) calculada durante la
+construcción de SSA. Intuitivamente, es la última versión SSA de $x$ que ha sido definida a lo
+largo del camino $j_0, \ldots, j_n$.
+\end{remark}
+
+\subsection{Equivalencia observacional}
+
+\begin{definition}[Equivalencia de trazas]
+\label{def:equiv-trazas}
+Sean $G$ un CFG en forma SSA y $G' = \mathrm{Destruct}(G)$ su destrucción
+(Definición~\ref{def:destruccion}). Sean
+\[
+  \pi  = (\sigma_0,  j_0,  \bot) \to (\sigma_1,  j_1,  j_0) \to \cdots
+\]
+\[
+  \pi' = (\sigma_0', j_0', \bot) \to (\sigma_1', j_1', j_0') \to \cdots
+\]
+dos trazas de ejecución de $G$ y $G'$, respectivamente, con la misma valuación inicial de
+variables originales. Decimos que $\pi$ y $\pi'$ son \emph{equivalentes} si:
+\begin{enumerate}
+  \item Producen el mismo camino de ejecución: $j_n = j_n'$ para todo $n$,
+  \item En cada paso $n$, las valuaciones proyectadas coinciden:
+    $\bar\sigma_n = \bar\sigma_n'$.
+\end{enumerate}
+\end{definition}
+
+\subsection{Teorema de corrección (enunciado)}
+
+\begin{theorem}[Corrección de la destrucción naive]
+\label{thm:correctness}
+Sea $P$ un programa CVM, $G$ el CFG en forma SSA obtenido por construcción estándar a partir
+de $P$, y $G' = \mathrm{Destruct}(G)$ el CFG resultante de aplicar la destrucción naive
+(Definición~\ref{def:destruccion}).
+
+Para toda valuación inicial $\sigma_0$ de las variables originales de $P$, las trazas de
+ejecución de $G$ y $G'$ iniciadas en $\sigma_0$ son equivalentes en el sentido de la
+Definición~\ref{def:equiv-trazas}.
+\end{theorem}
+
+\subsection{Demostración del Teorema de Corrección}
+
+% INTUICION GENERAL:
+% Tenemos dos programas: G (el CFG con phis) y G' (el CFG sin phis, con copias en su lugar).
+% Queremos demostrar que "hacen lo mismo". La estrategia es ir paso a paso por la ejecucion
+% (bloque a bloque) y en cada paso comprobar que ambos programas estan "en el mismo sitio"
+% y con "los mismos valores" en las variables que importan.
+%
+% La demostracion se apoya en dos lemas:
+%   - Lema 1: las dos fases de copias temporales producen el mismo efecto que las phis.
+%   - Lema 2: si un bloque tiene copias para varios sucesores (caso if), no se molestan entre si.
+% Y luego el teorema se demuestra por induccion: si en el paso n todo va bien, en el paso n+1
+% tambien.
+
+La demostración se estructura en dos partes: un lema clave que establece que las dos fases
+de copias temporales reproducen fielmente la semántica paralela de las $\phi$-funciones, y
+la demostración del teorema principal por inducción sobre la longitud de la traza.
+
+% ----------------------------------------------------------
+\subsubsection{Notación para la demostración}
+
+% INTUICION:
+% Solo estamos poniendo nombres a las cosas para poder hablar de ellas:
+%   - S_j son las instrucciones "de verdad" del bloque j (las mismas en G y en G').
+%   - C_j^p son las copias que metimos al final del bloque p para reemplazar las phis del bloque j.
+%   - S_p' es todo lo que tiene el bloque p en G': sus instrucciones originales + las copias pegadas al final.
+
+Dado el CFG original $G = (\mathcal{B}, \mathrm{entry})$ y su destrucción
+$G' = (\mathcal{B}', \mathrm{entry})$ (Definición~\ref{def:destruccion}), denotamos:
+
+\begin{itemize}
+  \item $S_j$ la secuencia de instrucciones \emph{originales} del bloque $B_j$ (igual en $G$
+    y en $G'$).
+  \item $C_j^p$ la secuencia de copias (fase~1 + fase~2) insertada al final de $B_p$ para las
+    $\phi$-funciones de $B_j$, según la Definición~\ref{def:destruccion}.
+  \item $S_p'$ la secuencia completa de instrucciones de $B_p$ en $G'$:
+    \[
+      S_p' = S_p \;\|\; C_{j_1}^p \;\|\; C_{j_2}^p \;\|\; \cdots
+    \]
+    donde $j_1, j_2, \ldots$ son los sucesores de $B_p$ que poseen $\phi$-funciones, y
+    $\|$ denota concatenación.
+\end{itemize}
+
+% ----------------------------------------------------------
+\subsubsection{Lema clave: corrección de las dos fases de copias}
+
+% INTUICION DEL LEMA 1:
+% La phi dice "lee todo a la vez y escribe todo a la vez" (paralelo).
+% Nosotros no podemos hacer eso con instrucciones normales (que son secuenciales).
+% Lo que hacemos es:
+%   Fase 1: guardar cada valor original en un temporal (tmp_0 = y1, tmp_1 = y2, ...)
+%   Fase 2: copiar cada temporal al destino final (x1 = tmp_0, x2 = tmp_1, ...)
+%
+% Esto funciona porque:
+%   - En la Fase 1, escribir en un temporal NUNCA machaca ningun y_i,
+%     porque los temporales son nombres nuevos que no existen en el programa original.
+%   - En la Fase 2, escribir en un destino x_j NUNCA machaca ningun temporal,
+%     por la misma razon: son nombres completamente distintos.
+%
+% Asi que al final, cada x_i acaba con el valor original de y_i, exactamente como la phi.
+
+\begin{lemma}[Las copias temporales emulan la ejecución paralela]
+\label{lem:two-phase}
+Sea $B_j$ un bloque con $\Phi_j = [\phi_1, \ldots, \phi_m]$, donde
+$\phi_i.\mathrm{out} = x_i$ y $\phi_i.\mathrm{arg}(p) = y_i$ para un predecesor $p$.
+Sean $t_k, t_{k+1}, \ldots, t_{k+m-1}$ variables frescas (Definición~\ref{def:frescas}).
+
+Sea $\sigma$ una valuación cualquiera. Entonces la ejecución secuencial de las copias de
+fase~1 y fase~2:
+\[
+  C_j^p = [\,t_k \leftarrow y_1,\; \ldots,\; t_{k+m-1} \leftarrow y_m,\;
+            x_1 \leftarrow t_k,\; \ldots,\; x_m \leftarrow t_{k+m-1}\,]
+\]
+satisface:
+\begin{enumerate}
+  \item $\llbracket C_j^p \rrbracket_\sigma(x_i)
+        = \llbracket \Phi_j \rrbracket_{\sigma,\,p}(x_i)
+        = \sigma(y_i)$
+    \quad para todo $i \in \{1, \ldots, m\}$.
+
+  \item $\llbracket C_j^p \rrbracket_\sigma(v) = \sigma(v)$
+    \quad para todo $v \notin \{x_1, \ldots, x_m,\; t_k, \ldots, t_{k+m-1}\}$.
+\end{enumerate}
+\end{lemma}
+
+\begin{proof}
+
+% INTUICION DE LA PRUEBA:
+% Vamos a seguir la ejecucion instruccion por instruccion.
+% sigma_0 es el estado ANTES de ejecutar nada.
+% sigma_1 es el estado despues de ejecutar "tmp_0 = y1".
+% sigma_2 es el estado despues de ejecutar tambien "tmp_1 = y2".
+% ... y asi hasta sigma_m (fin de Fase 1).
+% Luego seguimos con la Fase 2 hasta llegar al estado final sigma*.
+
+Definimos $\sigma_0 = \sigma$ y, para $i = 1, \ldots, m$:
+\[
+  \sigma_i = \sigma_{i-1}[t_{k+i-1} \mapsto \sigma_{i-1}(y_i)].
+\]
+Estas son las valuaciones intermedias tras cada instrucción de la fase~1.
+
+\medskip
+% INTUICION DE LA FASE 1:
+% Queremos demostrar que cada temporal acaba con el valor original de su fuente.
+% Es decir: tmp_i guarda el valor que tenia y_i ANTES de que empezaramos a tocar nada.
+% Esto es asi porque:
+%   - Cuando escribimos en tmp_i, NO estamos modificando ningun y_j (los temporales
+%     son nombres completamente nuevos, nunca coinciden con variables del programa).
+%   - Tampoco estamos modificando ningun temporal anterior (cada tmp tiene nombre distinto).
+% Entonces la lectura de y_i siempre da el valor original.
+\textbf{Propiedad de la fase~1.} Para todo $i \in \{1, \ldots, m\}$:
+\[
+  \sigma_i(t_{k+i-1}) = \sigma(y_i).
+\]
+
+Esto se demuestra por inducción sobre $i$. Para $i = 1$:
+$\sigma_1(t_k) = \sigma_0(y_1) = \sigma(y_1)$.
+Para el paso inductivo, basta observar que la escritura de $t_{k+i-1}$ no modifica
+ninguna variable $y_l$ (con $l \leq m$) ni ningún temporal previo $t_{k+l-1}$ (con $l < i$),
+porque:
+\begin{itemize}
+  \item Los temporales $t_{k+i-1}$ son \emph{frescos}: $t_{k+i-1} \neq y_l$ para todo $l$
+    (ningún temporal aparece como operando en $G$, y los $y_l$ son operandos de $\phi$-funciones
+    de~$G$).
+  \item Todos los temporales son distintos entre sí por construcción del contador $k$.
+\end{itemize}
+
+Por lo tanto, al final de la fase~1 (tras $m$ instrucciones), la valuación $\sigma_m$ satisface:
+\begin{align}
+  \sigma_m(t_{k+i-1}) &= \sigma(y_i) \quad \text{para } i = 1, \ldots, m, \label{eq:phase1-temps}\\
+  \sigma_m(v) &= \sigma(v) \quad \text{para } v \notin \{t_k, \ldots, t_{k+m-1}\}. \label{eq:phase1-rest}
+\end{align}
+
+\medskip
+% INTUICION DE LA FASE 2:
+% Ahora los temporales ya tienen guardados los valores originales.
+% Vamos asignando: x1 = tmp_0, x2 = tmp_1, ...
+% La pregunta clave: cuando hacemos x2 = tmp_1, no se habra machacado tmp_1?
+% No, porque escribimos en x_j (que es una variable SSA del programa), y los temporales
+% son nombres frescos. x_j nunca es igual a tmp_i. Asi que leer tmp_i siempre da bien.
+\textbf{Propiedad de la fase~2.} Definimos $\sigma_m^{(0)} = \sigma_m$ y, para $i = 1, \ldots, m$:
+\[
+  \sigma_m^{(i)} = \sigma_m^{(i-1)}[x_i \mapsto \sigma_m^{(i-1)}(t_{k+i-1})].
+\]
+La valuación final es $\sigma^* = \sigma_m^{(m)} = \llbracket C_j^p \rrbracket_\sigma$.
+
+Para todo $i$, se tiene que $\sigma_m^{(i-1)}(t_{k+i-1}) = \sigma_m(t_{k+i-1}) = \sigma(y_i)$.
+Esto se debe a que la escritura $x_l \leftarrow t_{k+l-1}$ (para $l < i$) modifica $x_l$, pero
+$x_l \neq t_{k+i-1}$ ya que los temporales son frescos (no son variables SSA de~$G$, mientras
+que los~$x_l$ sí lo son). Por tanto:
+\[
+  \sigma^*(x_i) = \sigma(y_i) \quad \text{para todo } i \in \{1, \ldots, m\}.
+\]
+
+Además, para toda variable $v \notin \{x_1, \ldots, x_m,\, t_k, \ldots, t_{k+m-1}\}$,
+ninguna de las $2m$ instrucciones de $C_j^p$ modifica $v$, luego $\sigma^*(v) = \sigma(v)$.
+
+\medskip
+Comparando con la Definición~\ref{def:ejec-phi}:
+$\llbracket \Phi_j \rrbracket_{\sigma,\,p}(x_i) = \sigma(y_i^p) = \sigma(y_i)$,
+concluimos que $\sigma^*(x_i) = \llbracket \Phi_j \rrbracket_{\sigma,\,p}(x_i)$ para todo~$i$.
+\end{proof}
+
+% ----------------------------------------------------------
+\subsubsection{Propiedad estructural: a lo sumo un sucesor con $\phi$-funciones}
+
+% INTUICION:
+% Antes teniamos un Lema de "no interferencia" para el caso en que un bloque
+% tuviera dos sucesores condicionales ambos con phis. Pero al revisar la
+% construccion de SSA, resulta que eso NUNCA pasa:
+%   - Los saltos condicionales solo se crean en handle_if.
+%   - Alli, los dos sucesores inmediatos (then_b y else_b) son bloques
+%     recien creados, cada uno con UN SOLO predecesor (el bloque condicional).
+%   - Con un solo predecesor, read_recursive nunca inserta phis.
+%   - El unico caso en que un sucesor del bloque condicional puede tener phis
+%     es el if SIN else, donde else_b = join. El join tiene 2+ predecesores,
+%     pero then_b sigue teniendo solo 1.
+%   - Por tanto, como mucho UN sucesor tiene phis. Nunca los dos.
+%
+% Esto simplifica la demostracion: no hace falta demostrar que las copias
+% de distintos sucesores no interfieren, porque esa situacion no existe.
+
+\begin{proposition}[A lo sumo un sucesor con $\phi$-funciones]
+\label{prop:at-most-one-phi-succ}
+Sea $G = (\mathcal{B}, \mathrm{entry})$ un CFG en forma SSA construido por el algoritmo
+de construcción estándar (Braun et al.). Para todo bloque $B_p$ con sucesor condicional
+$\mathrm{succ}(B_p) = \mathrm{cond}(a, j_1, j_2)$, a lo sumo uno de los bloques $B_{j_1}$,
+$B_{j_2}$ tiene una lista de $\phi$-funciones no vacía.
+\end{proposition}
+
+\begin{proof}
+En la construcción de SSA implementada, los saltos condicionales se generan únicamente en
+el manejo de sentencias \texttt{if-then-else}. Analizamos los dos casos posibles:
+
+\medskip
+\emph{Caso 1: \texttt{if} con \texttt{else}.}
+Se crean tres bloques nuevos: $B_{\mathrm{then}}$, $B_{\mathrm{else}}$ y $B_{\mathrm{join}}$.
+El bloque actual $B_p$ recibe el sucesor condicional hacia $B_{\mathrm{then}}$ y $B_{\mathrm{else}}$.
+Ambos son bloques recién creados, y su único predecesor es~$B_p$:
+$|\mathrm{pred}(B_{\mathrm{then}})| = |\mathrm{pred}(B_{\mathrm{else}})| = 1$.
+
+Las $\phi$-funciones solo se insertan cuando un bloque tiene dos o más predecesores
+(en el algoritmo, \texttt{read\_recursive} solo crea una $\phi$ cuando
+$|\mathrm{pred}(B)| \geq 2$). Por tanto, ni $B_{\mathrm{then}}$ ni $B_{\mathrm{else}}$
+contienen $\phi$-funciones. Los sucesores directos de $B_p$ tienen ambos
+$\Phi = [\,]$.
+
+\medskip
+\emph{Caso 2: \texttt{if} sin \texttt{else}.}
+Se crean dos bloques nuevos: $B_{\mathrm{then}}$ y $B_{\mathrm{join}}$.
+El bloque actual $B_p$ recibe el sucesor condicional hacia $B_{\mathrm{then}}$ (rama verdadera) y
+$B_{\mathrm{join}}$ (rama falsa).
+
+$B_{\mathrm{then}}$ tiene un único predecesor ($B_p$), luego $\Phi_{\mathrm{then}} = [\,]$.
+$B_{\mathrm{join}}$ recibe como predecesores a $B_p$ (rama falsa) y al bloque final del cuerpo
+del \texttt{then}, luego $|\mathrm{pred}(B_{\mathrm{join}})| \geq 2$ y puede contener
+$\phi$-funciones.
+
+En este caso, exactamente uno de los dos sucesores ($B_{\mathrm{join}}$) puede tener
+$\phi$-funciones, y el otro ($B_{\mathrm{then}}$) no.
+
+\medskip
+En ambos casos, a lo sumo un sucesor directo de $B_p$ tiene $\Phi \neq [\,]$.
+\end{proof}
+
+\begin{remark}
+Esta propiedad es específica de la construcción de SSA implementada. En un CFG SSA
+genérico (por ejemplo, tras transformaciones arbitrarias), podría darse el caso de un
+bloque con dos sucesores condicionales ambos con $\phi$-funciones. Para completitud,
+enunciamos a continuación el lema de no interferencia que cubriría ese caso general,
+aunque no es necesario para la corrección de nuestra implementación concreta.
+\end{remark}
+
+\begin{lemma}[No interferencia --- caso general]
+\label{lem:no-interference}
+Sea $B_p$ un bloque con sucesores $B_{j_1}$ y $B_{j_2}$ (caso condicional), ambos con
+$\phi$-funciones. Las copias $C_{j_1}^p$ y $C_{j_2}^p$ insertadas en $B_p$ no interfieren
+entre sí: la ejecución secuencial
+$\llbracket S_p \;\|\; C_{j_1}^p \;\|\; C_{j_2}^p \rrbracket_\sigma$
+produce los mismos valores para las variables de salida de $\Phi_{j_1}$ y $\Phi_{j_2}$ que
+si se ejecutase cada grupo de copias por separado sobre $\llbracket S_p \rrbracket_\sigma$.
+\end{lemma}
+
+\begin{proof}
+Sean $\{x_1^{(1)}, \ldots, x_{m_1}^{(1)}\}$ las variables de salida de $\Phi_{j_1}$ y
+$\{x_1^{(2)}, \ldots, x_{m_2}^{(2)}\}$ las de $\Phi_{j_2}$. Sean
+$\{t_k, \ldots, t_{k+m_1-1}\}$ los temporales de $C_{j_1}^p$ y
+$\{t_{k+m_1}, \ldots, t_{k+m_1+m_2-1}\}$ los de $C_{j_2}^p$.
+
+Los siguientes conjuntos son \emph{mutuamente disjuntos}:
+\begin{itemize}
+  \item Las variables de salida de $\Phi_{j_1}$ y las de $\Phi_{j_2}$ son disjuntas por la
+    propiedad SSA (Definición~\ref{def:ssa}): cada variable se define a lo sumo una vez.
+  \item Todos los temporales son distintos entre sí (contador global $k$) y distintos de toda
+    variable SSA (frescura, Definición~\ref{def:frescas}).
+\end{itemize}
+
+Por tanto, las escrituras de $C_{j_1}^p$ (a temporales $t_k, \ldots, t_{k+m_1-1}$ y a variables
+$x^{(1)}_i$) no modifican ninguna variable leída ni escrita por $C_{j_2}^p$ (que lee
+$y^{(2)}_i$ y escribe temporales $t_{k+m_1}, \ldots$ y variables $x^{(2)}_i$), y viceversa.
+
+En particular, las fuentes $y_i^{(l)}$ de cada grupo de copias son variables definidas en
+bloques anteriores de~$G$, y por tanto no son ni temporales ni variables de salida de phis
+de otros bloques. Así, las escrituras de un grupo no afectan las lecturas del otro.
+\end{proof}
+
+% ----------------------------------------------------------
+\subsubsection{Demostración del Teorema~\ref{thm:correctness}}
+
+% INTUICION DEL TEOREMA PRINCIPAL:
+% Imaginemos que G y G' son dos "maquinas" que ejecutan el programa bloque a bloque.
+% Queremos demostrar que siempre van al mismo bloque y producen los mismos valores.
+%
+% Lo hacemos por induccion: si en el paso n ambas maquinas estan en el mismo bloque
+% con los mismos valores relevantes, entonces en el paso n+1 tambien.
+%
+% El "invariante" I(n) dice exactamente eso:
+%   (I1) Estan en el mismo bloque (mismo camino).
+%   (I2) Las variables que importan para ejecutar ese bloque tienen el mismo valor.
+%        En G, despues de ejecutar las phis del bloque.
+%        En G', directamente al entrar (porque las copias ya se hicieron en el bloque anterior).
+
+\begin{proof}[Demostración del Teorema~\ref{thm:correctness}]
+La demostración procede por inducción fuerte sobre el índice $n$ de la traza.
+
+\medskip
+\textbf{Invariante $I(n)$.} Sea
+$\pi = (\sigma_0, j_0, \bot) \to (\sigma_1, j_1, p_1) \to \cdots$
+la traza de $G$ y
+$\pi' = (\sigma_0', j_0', \bot) \to (\sigma_1', j_1', p_1') \to \cdots$
+la traza de $G'$, ambas con la misma valuación inicial de variables originales.
+
+Decimos que $I(n)$ se cumple si:
+\begin{enumerate}
+  \item[\textbf{(I1)}] $j_n = j_n'$ y $p_n = p_n'$ \quad (mismo camino),
+  \item[\textbf{(I2)}] para toda variable $v$ que sea operando de alguna instrucción
+    de~$S_{j_n}$ o de la condición de $\mathrm{succ}(B_{j_n})$, se tiene que la valuación al
+    inicio de la ejecución de $S_{j_n}$ es la misma en $G$ y en $G'$. Formalmente:
+    \[
+      \llbracket \Phi_{j_n} \rrbracket_{\sigma_n^-,\, p_n}(v)
+      \;=\; \sigma_n'^{-}(v),
+    \]
+    donde $\sigma_n^-$ y $\sigma_n'^{-}$ son las valuaciones al \emph{entrar} en el bloque
+    $j_n$ en $G$ y $G'$ respectivamente (es decir, antes de ejecutar $\Phi_{j_n}$ y $S_{j_n}$
+    en $G$, y antes de ejecutar $S_{j_n}$ en $G'$, que no tiene phis).
+\end{enumerate}
+
+\medskip
+% CASO BASE: Ambos programas empiezan en el mismo sitio (bloque entry) con los mismos valores.
+% El bloque de entrada no tiene predecesores, asi que no tiene phis. No hay diferencia
+% entre G y G' aqui. Trivial.
+\textbf{Caso base ($n = 0$).}
+En ambos CFGs, $j_0 = j_0' = \mathrm{entry}$ y $p_0 = p_0' = \bot$.
+El bloque de entrada no tiene predecesores, luego $\Phi_{\mathrm{entry}} = [\,]$
+(no hay $\phi$-funciones sin predecesores). Así
+$\llbracket \Phi_{\mathrm{entry}} \rrbracket_{\sigma_0, \bot} = \sigma_0$.
+En $G'$, $\sigma_0'^{-} = \sigma_0' = \sigma_0$ (misma valuación inicial).
+El invariante $I(0)$ se satisface trivialmente.
+
+\medskip
+% PASO INDUCTIVO:
+% Suponemos que I(n) vale (estamos en el mismo bloque, mismos valores).
+% Ahora ejecutamos el bloque actual y vemos que pasa.
+%
+% Paso 1: Las instrucciones originales S_{j_n} son las MISMAS en G y G'.
+%         Y por I(n) reciben los mismos valores de entrada.
+%         Por tanto producen los mismos resultados. Llamamos sigma_mid a ese estado comun.
+\textbf{Paso inductivo.} Supongamos que $I(n)$ se cumple. Probamos $I(n+1)$.
+
+Por la hipótesis \textbf{(I2)}, las instrucciones de $S_{j_n}$ reciben los mismos valores de
+entrada en $G$ y en $G'$. Puesto que $S_{j_n}$ es idéntico en ambos CFGs
+(la destrucción no modifica las instrucciones originales), la ejecución secuencial
+(Definición~\ref{def:ejec-secuencia}) produce la misma valuación para todas las variables
+definidas en $S_{j_n}$ y preserva el valor de las demás. Llamemos $\sigma_{\mathrm{mid}}$
+a esta valuación común tras ejecutar $S_{j_n}$ (en $G$) y $S_{j_n}$ (la parte original, en $G'$).
+
+\medskip
+% Paso 2: Como los valores son iguales y el sucesor (la condicion del if o el goto) no ha
+%         cambiado, ambos programas van al MISMO bloque siguiente.
+%         Esto nos da (I1) para n+1.
+\textbf{Determinación del siguiente bloque.}
+En $G$: $j_{n+1} = \mathrm{next}(j_n, \sigma_{\mathrm{mid}})$.
+En $G'$: el sucesor $\mathrm{succ}(B_{j_n})$ es el mismo (no se modifica), y la condición
+se evalúa sobre $\sigma_{\mathrm{mid}}$ (la condición solo depende de variables de $S_{j_n}$
+o anteriores, que son iguales). Luego $j_{n+1}' = j_{n+1}$ y $p_{n+1}' = j_n = j_n' = p_{n+1}$.
+Se cumple \textbf{(I1)} para $n+1$.
+
+\medskip
+% Paso 3: Ahora viene la parte clave. En G', despues de las instrucciones originales,
+%         se ejecutan las copias que metimos para reemplazar las phis del bloque siguiente.
+%
+%         En G, las phis del bloque siguiente se ejecutarian al ENTRAR en ese bloque.
+%         En G', las copias se ejecutan al SALIR del bloque actual.
+%         Pero el efecto es el mismo (Lema 1).
+%
+%         Si ademas hay copias "extra" para phis de OTRO sucesor (caso if con dos ramas),
+%         no pasa nada: no interfieren (Lema 2).
+\textbf{Efecto de las copias en $G'$.}
+En $G'$, tras ejecutar $S_{j_n}$ (dando $\sigma_{\mathrm{mid}}$), se ejecutan las copias
+$C_{j_{n+1}}^{j_n}$ (y posiblemente $C_{j'}^{j_n}$ para otros sucesores $j'$ de $B_{j_n}$
+que tengan phis). Sea $\sigma_{\mathrm{fin}}'$ la valuación tras ejecutar todas las copias.
+
+Por el Lema~\ref{lem:two-phase}, aplicado con $\sigma = \sigma_{\mathrm{mid}}$:
+\[
+  \sigma_{\mathrm{fin}}'(x_i) = \sigma_{\mathrm{mid}}(y_i)
+  \quad \text{para cada } \phi_i \in \Phi_{j_{n+1}} \text{ con } \phi_i.\mathrm{arg}(j_n) = y_i.
+\]
+
+Por el Lema~\ref{lem:no-interference}, las copias para otros sucesores $j' \neq j_{n+1}$
+no modifican las variables $y_i$ (fuentes de $\Phi_{j_{n+1}}$), ni las variables de salida
+$x_i$ de $\Phi_{j_{n+1}}$, ni los temporales usados por $C_{j_{n+1}}^{j_n}$.
+
+Para toda variable $v$ que no es variable de salida de ningún $\Phi$ ni temporal:
+$\sigma_{\mathrm{fin}}'(v) = \sigma_{\mathrm{mid}}(v)$.
+
+\medskip
+% Paso 4: Ahora verificamos (I2) para n+1.
+%         Cogemos cualquier variable v que se use en las instrucciones del bloque siguiente.
+%         Hay dos casos:
+%
+%         Caso 1: v NO es una variable de salida de ninguna phi del bloque siguiente.
+%                 Entonces ni las phis (en G) ni las copias (en G') la tocan.
+%                 Su valor viene de antes, y es el mismo: sigma_mid(v).
+%
+%         Caso 2: v SI es una variable de salida de una phi (v = x_i).
+%                 En G: la phi le asigna el valor sigma_mid(y_i).
+%                 En G': la copia (Lema 1) le asigna el valor sigma_mid(y_i).
+%                 Mismo resultado.
+\textbf{Verificación de \textbf{(I2)} para $n+1$.}
+Sea $v$ un operando de $S_{j_{n+1}}$ o de la condición de $\mathrm{succ}(B_{j_{n+1}})$.
+
+\emph{Caso 1:} $v$ no es variable de salida de ninguna $\phi$-función de $\Phi_{j_{n+1}}$.
+\begin{itemize}
+  \item En $G$: $\llbracket \Phi_{j_{n+1}} \rrbracket_{\sigma_{\mathrm{mid}}, j_n}(v)
+    = \sigma_{\mathrm{mid}}(v)$ \quad (la ejecución paralela no modifica $v$).
+  \item En $G'$: $\sigma_{\mathrm{fin}}'(v) = \sigma_{\mathrm{mid}}(v)$ \quad
+    (las copias no escriben en $v$: los destinos son variables de salida de phis y temporales,
+    ninguno de los cuales es $v$).
+  \item Ambos coinciden. \checkmark
+\end{itemize}
+
+\emph{Caso 2:} $v = x_i$ para alguna $\phi_i \in \Phi_{j_{n+1}}$ con
+$\phi_i.\mathrm{arg}(j_n) = y_i$.
+\begin{itemize}
+  \item En $G$: $\llbracket \Phi_{j_{n+1}} \rrbracket_{\sigma_{\mathrm{mid}}, j_n}(x_i)
+    = \sigma_{\mathrm{mid}}(y_i)$ \quad (Definición~\ref{def:ejec-phi}).
+  \item En $G'$: $\sigma_{\mathrm{fin}}'(x_i) = \sigma_{\mathrm{mid}}(y_i)$ \quad
+    (Lema~\ref{lem:two-phase}).
+  \item Ambos coinciden. \checkmark
+\end{itemize}
+
+\medskip
+En ambos casos \textbf{(I2)} se cumple para $n+1$.
+
+\medskip
+% CONCLUSION: Como (I1) e (I2) se cumplen para n+1, podemos seguir indefinidamente.
+% En cada paso ambos programas estan en el mismo sitio con los mismos valores.
+% Por tanto las trazas son equivalentes.
+\textbf{Equivalencia de valuaciones proyectadas.}
+Dado que $I(n)$ implica que $S_{j_n}$ se ejecuta con los mismos operandos en $G$ y $G'$,
+las variables definidas por $S_{j_n}$ reciben los mismos valores. Las variables ``activas''
+al final de $B_{j_n}$ (en el sentido de la Definición~\ref{def:rho}) son aquellas definidas
+en $S_{j_n}$ o heredadas de bloques anteriores; en ambos casos sus valores coinciden.
+Por tanto, $\bar\sigma_n = \bar\sigma_n'$ (las valuaciones proyectadas son iguales).
+
+\medskip
+Por inducción, $I(n)$ se cumple para todo $n \geq 0$, lo que establece la equivalencia
+de trazas en el sentido de la Definición~\ref{def:equiv-trazas}.
+\end{proof}
+
+\end{document}

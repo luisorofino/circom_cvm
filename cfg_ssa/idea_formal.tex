@@ -1,0 +1,168 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\newtheorem{definition}{Definición}
+\newtheorem{theorem}{Teorema}
+\newtheorem{lemma}{Lema}
+
+\title{Borrador: ideas para la formalización\\de la destrucción naive de SSA}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Contexto}
+
+El objetivo es demostrar que la destrucción naive de SSA que hemos implementado es correcta:
+que el programa resultante (sin $\phi$-funciones) se comporta igual que el programa en forma
+SSA (con $\phi$-funciones).
+
+La implementación ya está hecha en \texttt{ssa\_destruction.rs}. El algoritmo, de forma
+resumida, hace lo siguiente: para cada bloque que tiene $\phi$-funciones, y para cada
+predecesor de ese bloque, mete instrucciones de copia al final del predecesor en dos fases:
+\begin{enumerate}
+  \item Fase 1: guarda cada valor fuente de la $\phi$ en una variable temporal nueva.
+  \item Fase 2: copia cada temporal a la variable destino de la $\phi$.
+\end{enumerate}
+Después, borra las $\phi$-funciones del bloque.
+
+\section{El problema central}
+
+Las $\phi$-funciones tienen semántica \textbf{paralela}: todas leen el estado
+\emph{antes} de que ninguna escriba. Es decir, si tenemos:
+\[
+  x = \phi(a : p_1, \ldots), \quad y = \phi(b : p_1, \ldots)
+\]
+ambas leen $a$ y $b$ del estado $\sigma$ original. Ninguna ve la escritura de la otra.
+
+Pero las instrucciones de copia normales son \textbf{secuenciales}: cada una ve las
+escrituras de las anteriores. Si simplemente ponemos $x \leftarrow a;\; y \leftarrow b$,
+normalmente no hay problema. Pero si $b = x$ (la fuente de la segunda es el destino de
+la primera), entonces la segunda leería el valor nuevo de $x$, no el original. Eso sería
+incorrecto.
+
+Por eso usamos temporales: primero guardamos todo, luego asignamos todo.
+
+\section{Por qué funcionan los temporales}
+
+La idea clave es que los temporales son \textbf{nombres frescos}: no existen en el
+programa original. Entonces:
+
+\begin{itemize}
+  \item En la Fase 1, cuando escribimos \texttt{tmp\_0 = a}, no estamos machacando
+    ninguna variable fuente (porque \texttt{tmp\_0} es un nombre nuevo, distinto de
+    \texttt{a}, \texttt{b}, etc.).
+  \item En la Fase 2, cuando escribimos \texttt{x = tmp\_0}, no estamos machacando
+    ningún temporal (porque \texttt{x} es una variable SSA, y los temporales son
+    nombres diferentes).
+\end{itemize}
+
+Resultado: cada destino $x_i$ acaba con el valor original de su fuente $y_i$, exactamente
+como haría la $\phi$ en paralelo.
+
+Esto debería poder formalizarse como un lema: algo del tipo ``la ejecución secuencial
+de las $2m$ copias (Fase 1 + Fase 2) produce el mismo resultado sobre las variables
+$x_1, \ldots, x_m$ que la ejecución paralela de las $\phi$-funciones''.
+
+La demostración sería por inducción sobre el número de copias, usando que la frescura
+de los temporales garantiza que las escrituras no interfieren con las lecturas posteriores.
+
+\section{Idea de la demostración principal}
+
+La idea es demostrar por \textbf{inducción sobre la traza} (la secuencia de bloques
+que se ejecutan) que ambos programas ($G$ con phis, $G'$ sin phis) producen el mismo
+resultado.
+
+\subsection{Qué es una traza}
+
+Una traza es simplemente la secuencia de configuraciones (estado, bloque actual, bloque
+anterior) que se va generando al ejecutar el programa bloque a bloque. En cada paso se
+ejecuta un bloque: primero sus $\phi$-funciones (si las tiene), luego sus instrucciones,
+y luego se determina el siguiente bloque.
+
+\subsection{El invariante}
+
+La idea es definir un invariante $I(n)$ que diga:
+
+\begin{quote}
+  En el paso $n$ de la traza, $G$ y $G'$ están en el mismo bloque, y las variables que
+  importan para ejecutar las instrucciones de ese bloque tienen los mismos valores en
+  ambos.
+\end{quote}
+
+Más formalmente, al llegar al bloque $j_n$:
+\begin{enumerate}
+  \item Mismo camino: $j_n = j_n'$ (ambos van al mismo bloque).
+  \item Mismos valores relevantes: para toda variable $v$ que aparezca como operando en
+    las instrucciones del bloque, el valor de $v$ justo antes de ejecutar las instrucciones
+    es igual en $G$ y en $G'$.
+\end{enumerate}
+
+La diferencia entre $G$ y $G'$ es \emph{cuándo} se asignan los valores de las $\phi$:
+\begin{itemize}
+  \item En $G$: las $\phi$ se ejecutan al \textbf{entrar} en el bloque destino.
+  \item En $G'$: las copias equivalentes se ejecutan al \textbf{salir} del bloque predecesor.
+\end{itemize}
+Pero por el lema de las dos fases, el efecto es el mismo.
+
+\subsection{Esquema del paso inductivo}
+
+Suponiendo $I(n)$:
+
+\begin{enumerate}
+  \item Las instrucciones originales del bloque $j_n$ son idénticas en $G$ y $G'$, y por
+    $I(n)$ reciben los mismos valores de entrada. Luego producen los mismos resultados.
+  \item El sucesor no cambia (los saltos son los mismos), así que ambos van al mismo bloque
+    siguiente. Esto da $I(n+1)$ parte (1).
+  \item En $G'$, después de las instrucciones originales, se ejecutan las copias (Fase 1 + 2).
+    Por el lema de las dos fases, las variables de salida de las $\phi$ del siguiente bloque
+    quedan con los valores correctos. Esto da $I(n+1)$ parte (2).
+\end{enumerate}
+
+\subsection{Caso base}
+
+$n = 0$: ambos empiezan en el bloque de entrada con los mismos valores. El bloque de entrada
+no tiene predecesores, así que no tiene $\phi$-funciones. No hay diferencia. Trivial.
+
+\section{Una propiedad útil de la construcción}
+
+Revisando el código de construcción de SSA, he observado que un bloque con sucesor condicional
+(un \texttt{if}) \textbf{nunca tiene ambos sucesores con $\phi$-funciones}. Esto es porque:
+
+\begin{itemize}
+  \item Los saltos condicionales solo se crean en \texttt{handle\_if}.
+  \item Los dos sucesores inmediatos (\texttt{then} y \texttt{else}) son bloques recién creados,
+    cada uno con un único predecesor.
+  \item Con un solo predecesor, no se insertan $\phi$-funciones.
+  \item Excepción: el \texttt{if} sin \texttt{else}, donde el sucesor falso es directamente
+    el \texttt{join}. El \texttt{join} tiene 2+ predecesores (puede tener $\phi$), pero el
+    \texttt{then} sigue teniendo solo 1.
+\end{itemize}
+
+Esto simplifica la demostración: no hay que preocuparse del caso en que se meten copias para
+$\phi$-funciones de dos sucesores distintos en el mismo bloque predecesor. Solo hay copias
+para un sucesor como máximo.
+
+Si quisiéramos ser más generales (por si en el futuro el CFG puede venir de otra fuente),
+habría que demostrar un lema adicional de ``no interferencia'' entre las copias de distintos
+sucesores. Pero para nuestra construcción concreta no hace falta.
+
+\section{Pendiente / próximos pasos}
+
+\begin{itemize}
+  \item Formalizar bien las definiciones: valuación, instrucción, bloque básico, CFG, traza.
+  \item Definir formalmente la semántica paralela de las $\phi$ y la secuencial de las copias.
+  \item Escribir y demostrar el lema de las dos fases (temporales emulan ejecución paralela).
+  \item Escribir y demostrar el teorema principal por inducción con el invariante descrito.
+  \item Definir la noción de equivalencia de trazas (mismos bloques visitados, mismas
+    valuaciones proyectadas sobre variables originales).
+  \item Quizás formalizar la noción de ``variable fresca'' y la relación entre nombres SSA
+    y nombres originales ($\rho$).
+\end{itemize}
+
+\end{document}

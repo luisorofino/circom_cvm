@@ -85,14 +85,14 @@ fn main() {
 
     // Construct the control flow graph (CFG)
     let t_cfg_start = Instant::now();
-    let cfg = CFGList::new(parsed_program);
-    let cfg = cfg.unwrap_or_else(|err| {
+    let mut cfg = CFGList::new(parsed_program);
+    let mut cfg = cfg.unwrap_or_else(|err| {
         eprintln!("Error at SSA construction: {}", err);
         std::process::exit(1);
     });
     let cfg_time = t_cfg_start.elapsed();
 
-    // Write the CFG to a JSON file
+    // Write the SSA CFG to JSON and DOT files
     let t_json_start = Instant::now();
     let json_output_path = format!("{}.json", file_no_suffix);
     if let Err(err) = fs::write(&json_output_path, cfg.to_json()) {
@@ -101,7 +101,6 @@ fn main() {
     }
     let json_time = t_json_start.elapsed();
 
-    // Write each CFG to a separate DOT file
     let t_dot_start = Instant::now();
     let dot_files = cfg.to_dot();
     for (index, dot_content) in dot_files.iter().enumerate() {
@@ -112,6 +111,17 @@ fn main() {
         }
     }
     let dot_time = t_dot_start.elapsed();
+
+    // Destroy SSA and write post-destruction DOT files
+    cfg.destroy_ssa_all();
+    let dot_destroyed = cfg.to_dot();
+    for (index, dot_content) in dot_destroyed.iter().enumerate() {
+        let dot_output_path = format!("{}_destroyed_{}.dot", file_no_suffix, index);
+        if let Err(err) = fs::write(&dot_output_path, dot_content) {
+            eprintln!("Error at writing destroyed DOT file {}: {}", dot_output_path, err);
+            std::process::exit(1);
+        }
+    }
     
 
     // --- Metrics mode ---
