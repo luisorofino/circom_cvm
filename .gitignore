@@ -11,3 +11,7 @@ type_analysis/target/
 .vscode/
 .DS_Store
 logs/
+**/*.dot
+**/*.json
+cfg_ssa/formalizacion.tex
+cfg_ssa/idea_formal.tex
