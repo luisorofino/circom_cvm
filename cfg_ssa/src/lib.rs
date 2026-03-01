@@ -629,6 +629,56 @@ impl CFG {
         dot
     }
 
+    pub fn to_dot_destruction(&self, id: usize) -> String {
+        fn esc(s: &str) -> String {
+            s.replace('"', "\\\"")
+        }
+
+        let mut dot = String::new();
+        dot.push_str(&format!("digraph G{} {{\n", id));
+
+        for block in &self.blocks {
+            let mut lines = Vec::new();
+            lines.push(format!("Block {}", block.id));
+
+            for phi in &block.phi_functions {
+                lines.push(format!("{:?}", phi));
+            }
+
+            for stmt in &block.statements {
+                lines.push(format!("{:?}", stmt));
+            }
+
+            let raw_label = lines.join("\n");
+            let label = esc(&raw_label);
+
+            dot.push_str(&format!(
+                    "  {} [label=\"{}\", shape=box];\n",
+                    block.id, label
+            ));
+
+            if let Some(succ) = &block.successors {
+                match succ {
+                    Successor::Unconditional { to } => {
+                        dot.push_str(&format!("  {} -> {};\n", block.id, to));
+                    }
+                    Successor::Conditional { condition, to_then, to_else } => {
+                        let cond = esc(&format!("{:?}", condition));
+                        dot.push_str(&format!(
+                                "  {} -> {} [label=\"{} != 0\"];\n",
+                                block.id, to_then, cond
+                        ));
+                        dot.push_str(&format!("  {} -> {} [label=\"{} == 0\"];\n",
+                                block.id, to_else, cond));
+                    }
+                }
+            }
+        }
+
+        dot.push_str("}\n");
+        dot
+    }
+
     fn get_block_size(&self, block: usize) -> usize {
         self.blocks[block].statements.len()
     }
@@ -673,6 +723,10 @@ impl CFGList {
 
     pub fn to_dot(&self) -> Vec<String> {
         self.cfgs.iter().enumerate().map(|(id, cfg)| cfg.to_dot(id)).collect()
+    }
+
+    pub fn to_dot_destruction(&self) -> Vec<String> {
+        self.cfgs.iter().enumerate().map(|(id, cfg)| cfg.to_dot_destruction(id)).collect()
     }
 
     ///Returns: num_cfgs, avg_blocks_per_cfg, avg_non_ssa_variables_per_cfg, avg_ssa_variables_per_cfg, avg_stmts_per_block
