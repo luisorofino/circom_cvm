@@ -115,7 +115,6 @@ fn main() {
 
     // Destroy SSA and write post-destruction DOT files
     cfg.destroy_ssa_all();
-    //let dot_destroyed = cfg.to_dot();
     let dot_destroyed = cfg.to_dot_destruction();
     for (index, dot_content) in dot_destroyed.iter().enumerate() {
         let dot_output_path = format!("{}_destroyed_{}.dot", file_no_suffix, index);
@@ -123,6 +122,13 @@ fn main() {
             eprintln!("Error at writing destroyed DOT file {}: {}", dot_output_path, err);
             std::process::exit(1);
         }
+    }
+
+    // Write the reconstructed CVM from post-destruction CFG
+    let cvm_output_path = format!("{}_destroyed.cvm", file_no_suffix);
+    if let Err(err) = fs::write(&cvm_output_path, cfg.to_cvm()) {
+        eprintln!("Error at writing destroyed CVM file {}: {}", cvm_output_path, err);
+        std::process::exit(1);
     }
     
 

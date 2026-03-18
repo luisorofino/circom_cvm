@@ -3,13 +3,15 @@ pub mod types;
 pub mod type_checking;
 mod cfg_construction;
 mod ssa_destruction;
+mod cvm_emission;
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use ast::{Function, Template, AST};
+use ast::{Function, Template, AST, ComponentCreationMode};
 use cfg_construction::CfgConstructor;
 
+use num_bigint_dig::BigInt;
 use serde::Serialize;
 
 use crate::types::*;
@@ -684,23 +686,68 @@ impl CFG {
     }
 }
 
-#[derive(Default, Debug, Serialize)]
+#[derive(Debug, Clone)]
+pub enum CfgMeta {
+    Template {
+        name: String,
+        outputs: Vec<String>,
+        inputs: Vec<String>,
+        signals: usize,
+        components: Vec<usize>,
+    },
+    Function {
+        name: String,
+        output: Option<NumericType>,
+        inputs: Vec<(NumericType, Vec<usize>)>,
+    },
+}
+
+#[derive(Debug)]
 pub struct CFGList {
     entry: usize,
     cfgs: Vec<CFG>,
+    metas: Vec<CfgMeta>,
+    prime: BigInt,
+    signals_memory: usize,
+    components_heap: usize,
+    main_template: String,
+    components_creation_mode: ComponentCreationMode,
+    witness: Vec<usize>,
 }
 
 impl CFGList {
     pub fn new(ast: AST) -> Result<Self, String> {
         let mut cfgs = Vec::new();
+        let mut metas = Vec::new();
         let mut entry = 0;
 
-        //CFGs for functions
+        let prime = ast.field.clone();
+        let signals_memory = ast.signals_memory;
+        let components_heap = ast.components_heap;
+        let main_template = ast.main_template.clone();
+        let components_creation_mode = ast.components_creation_mode.clone();
+        let witness = ast.witness.clone();
+
+        for f in &ast.functions {
+            metas.push(CfgMeta::Function {
+                name: f.name.clone(),
+                output: f.output.clone(),
+                inputs: f.inputs.clone(),
+            });
+        }
         for f in ast.functions {
             cfgs.push(CFG::new_from_fun(f)?);
         }
 
-        //CFGs for templates
+        for t in &ast.templates {
+            metas.push(CfgMeta::Template {
+                name: t.name.clone(),
+                outputs: t.outputs.clone(),
+                inputs: t.inputs.clone(),
+                signals: t.signals,
+                components: t.components.clone(),
+            });
+        }
         for t in ast.templates {
             if t.name == ast.main_template {
                 entry = cfgs.len();
@@ -708,7 +755,7 @@ impl CFGList {
             cfgs.push(CFG::new_from_template(t)?);
         }
 
-        Ok(Self { entry, cfgs })
+        Ok(Self { entry, cfgs, metas, prime, signals_memory, components_heap, main_template, components_creation_mode, witness })
     }
 
     pub fn destroy_ssa_all(&mut self) {
@@ -718,7 +765,12 @@ impl CFGList {
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap()
+        #[derive(Serialize)]
+        struct CfgListJson<'a> {
+            entry: usize,
+            cfgs: &'a Vec<CFG>,
+        }
+        serde_json::to_string(&CfgListJson { entry: self.entry, cfgs: &self.cfgs }).unwrap()
     }
 
     pub fn to_dot(&self) -> Vec<String> {
@@ -727,6 +779,76 @@ impl CFGList {
 
     pub fn to_dot_destruction(&self) -> Vec<String> {
         self.cfgs.iter().enumerate().map(|(id, cfg)| cfg.to_dot_destruction(id)).collect()
+    }
+
+    pub fn to_cvm(&self) -> String {
+        use crate::cvm_emission::cfg_to_cvm_body;
+
+        let mut out = String::new();
+        out.push_str(&format!("%%prime {}\n\n", self.prime));
+        out.push_str(&format!("%%signals {}\n\n", self.signals_memory));
+        out.push_str(&format!("%%components_heap {}\n\n", self.components_heap));
+        out.push_str(&format!("%%start {}\n\n", self.main_template));
+        let mode = match &self.components_creation_mode {
+            ComponentCreationMode::Implicit => "implicit",
+            ComponentCreationMode::Explicit => "explicit",
+        };
+        out.push_str(&format!("%%components {}\n\n", mode));
+        let witness_str: Vec<String> = self.witness.iter().map(|w| w.to_string()).collect();
+        out.push_str(&format!("%%witness {}\n\n", witness_str.join(" ")));
+
+        for (cfg, meta) in self.cfgs.iter().zip(self.metas.iter()) {
+            match meta {
+                CfgMeta::Template { name, outputs, inputs, signals, components } => {
+                    let out_str = if outputs.is_empty() {
+                        "[]".to_string()
+                    } else {
+                        format!("[ {} ]", outputs.join(" "))
+                    };
+                    let in_str = if inputs.is_empty() {
+                        "[]".to_string()
+                    } else {
+                        format!("[ {} ]", inputs.join(" "))
+                    };
+                    let comp_str = if components.is_empty() {
+                        "[]".to_string()
+                    } else {
+                        let cs: Vec<String> = components.iter().map(|c| c.to_string()).collect();
+                        format!("[ {} ]", cs.join(" "))
+                    };
+                    out.push_str(&format!("%%template {} {} {} [{}] {}\n", name, out_str, in_str, signals, comp_str));
+                }
+                CfgMeta::Function { name, output, inputs } => {
+                    let out_type = match output {
+                        Some(NumericType::Integer) => "[i64]",
+                        Some(NumericType::FiniteField) => "[ff]",
+                        None => "[]",
+                    };
+                    let mut in_parts = Vec::new();
+                    for (typ, dims) in inputs {
+                        let t = match typ {
+                            NumericType::Integer => "i64",
+                            NumericType::FiniteField => "ff",
+                        };
+                        let mut part = format!("{} {}", t, dims.len());
+                        for d in dims {
+                            part.push_str(&format!(" {}", d));
+                        }
+                        in_parts.push(part);
+                    }
+                    let in_str = if in_parts.is_empty() {
+                        "[]".to_string()
+                    } else {
+                        format!("[ {} ]", in_parts.join(" "))
+                    };
+                    out.push_str(&format!("%%function {} {} {}\n", name, out_type, in_str));
+                }
+            }
+            out.push_str(&cfg_to_cvm_body(cfg));
+            out.push('\n');
+        }
+
+        out
     }
 
     ///Returns: num_cfgs, avg_blocks_per_cfg, avg_non_ssa_variables_per_cfg, avg_ssa_variables_per_cfg, avg_stmts_per_block

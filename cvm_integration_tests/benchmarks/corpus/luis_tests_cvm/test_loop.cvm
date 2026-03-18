@@ -1,0 +1,18 @@
+%%prime 21888242871839275222246405745257275088548364400416034343698204186575808495617
+%%signals 2
+%%components_heap 0
+%%start LoopTest_0
+%%components implicit
+%%witness 0 1
+
+%%template LoopTest_0 [ ff 0 ] [ ff 1 ] [5] [ ]
+x_0 = get_signal i64.1
+loop
+  x_0 = ff.add x_0 ff.1
+  x_1 = ff.neq x_0 ff.5
+  ff.if x_1
+    continue
+  end
+  break
+end
+set_signal i64.0 x_0

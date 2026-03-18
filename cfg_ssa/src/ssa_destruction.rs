@@ -3,7 +3,8 @@ use crate::types::{Expression, Atomic};
 
 impl CFG {
     /// Replaces all phi functions with copy instructions in predecessor blocks.
-    /// Uses temporaries to guarantee parallel copy semantics.
+    /// Uses temporaries to guarantee parallel copy semantics (swap-safe).
+
     pub fn destroy_ssa(&mut self) {
         let mut next_tmp: usize = 0;
 
@@ -15,11 +16,17 @@ impl CFG {
             let phis = self.blocks[block_id].phi_functions.clone();
             let predecessors = self.blocks[block_id].predecessors.clone();
 
+            // For each phi, allocate one primed temporary shared across all predecessors.
+            // join_copies[i] = (phi_out, phi_p)
+            let join_copies: Vec<(String, String)> = phis.iter()
+                .map(|phi| (phi.output.clone(), Self::fresh_tmp(&mut next_tmp)))
+                .collect();
+
             for &pred_id in &predecessors {
-                // Collect (destination, source) for each phi
+                // Collect (phi_p, source) for each phi
                 let mut copies: Vec<(String, String)> = Vec::new();
 
-                for phi in &phis {
+                for (i, phi) in phis.iter().enumerate() {
                     let mut found_src = None;
                     for possibility in &phi.possibilities {
                         if possibility.block == pred_id {
@@ -28,10 +35,11 @@ impl CFG {
                         }
                     }
                     let src = found_src.expect("Missing phi operand for predecessor");
-                    copies.push((phi.output.clone(), src.variable.clone()));
+                    // Destination is phi_p
+                    copies.push((join_copies[i].1.clone(), src.variable.clone()));
                 }
 
-                // Phase 1: save all sources into temps
+                // Phase 1: save all sources into temps (avoids swap problem)
                 let mut tmp_names: Vec<String> = Vec::new();
                 for (_dst, src) in &copies {
                     let tmp = Self::fresh_tmp(&mut next_tmp);
@@ -40,12 +48,20 @@ impl CFG {
                     tmp_names.push(tmp);
                 }
 
-                // Phase 2: copy temps into final destinations
-                for (i, (dst, _src)) in copies.iter().enumerate() {
-                    let stmt = Self::make_copy(dst.clone(), tmp_names[i].clone());
+                // Phase 2: copy temps into primed destinations (phi_p = tmp)
+                for (i, (phi_p, _src)) in copies.iter().enumerate() {
+                    let stmt = Self::make_copy(phi_p.clone(), tmp_names[i].clone());
                     self.blocks[pred_id].add_instruction(stmt);
                 }
             }
+
+            // Insert join-block copies at the beginning: phi_out = phi_p
+            // These must precede all existing statements
+            let join_stmts: Vec<Statement> = join_copies.iter()
+                .map(|(dst, phi_p)| Self::make_copy(dst.clone(), phi_p.clone()))
+                .collect();
+            let old_stmts = std::mem::replace(&mut self.blocks[block_id].statements, join_stmts);
+            self.blocks[block_id].statements.extend(old_stmts);
 
             // Remove all phi functions from this block
             self.blocks[block_id].phi_functions.clear();

@@ -1,0 +1,17 @@
+%%prime 21888242871839275222246405745257275088548364400416034343698204186575808495617
+%%signals 3
+%%components_heap 0
+%%start MyTest_0
+%%components implicit
+%%witness 0 1 2
+
+%%template MyTest_0 [ ff 0 ] [ ff 1 2 ] [3] [ ]
+x_0 = get_signal i64.1
+x_1 = get_signal i64.2
+x_2 = ff.neq x_0 ff.0
+ff.if x_2
+  x_3 = ff.add x_1 ff.1
+else
+  x_3 = ff.mul x_1 ff.2
+end
+set_signal i64.0 x_3
