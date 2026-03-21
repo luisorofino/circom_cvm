@@ -102,8 +102,8 @@ fn main() {
     let json_time = t_json_start.elapsed();
 
     let t_dot_start = Instant::now();
-    //let dot_files = cfg.to_dot();
-    let dot_files = cfg.to_dot_destruction();
+    let dot_files = cfg.to_dot();
+    //let dot_files = cfg.to_dot_destruction();
     for (index, dot_content) in dot_files.iter().enumerate() {
         let dot_output_path = format!("{}_{}.dot", file_no_suffix, index);
         if let Err(err) = fs::write(&dot_output_path, dot_content) {

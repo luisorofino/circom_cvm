@@ -414,19 +414,38 @@ impl CFG {
             };
             let on_path = Self::on_path_from_def(&self.blocks, *def_block);
 
+            let def_v = self.definitions.get(var).unwrap_or_else(|| {
+                panic!("Variable {var} was used, but not defined!")
+            });
+
             for u in uses {
                 match u {
+                    // Phi-arg use: propagate from the supplying predecessor, not the join block.
+                    // This ensures the arg is in live_out[pred] but NOT in live_in[join],
+                    // following Brandner et al. (2011) live-on-edge semantics.
+                    Use::InInstruction(block, line) if line.is_phi => {
+                        if !on_path.contains(block) {
+                            return Err(format!("Variable {var} was used without being dominated by its definition"));
+                        }
+
+                        // Find which predecessors supply this var for the phi at this line
+                        let phi = &self.blocks[*block].phi_functions[line.line];
+                        let preds: Vec<usize> = phi.possibilities.iter()
+                            .filter(|p| p.variable == *var)
+                            .map(|p| p.block)
+                            .collect();
+
+                        for pred in preds {
+                            self.blocks[pred].add_to_live_out(var);
+                            Self::up_and_mark(&mut self.blocks, pred, var, def_v, &on_path);
+                        }
+                    }
+
+                    // Regular use (instruction operand or branch condition):
+                    // propagate from the use block upward as usual.
                     Use::InCondition(block) |
                     Use::InInstruction(block, _)
                     => {
-                        if self.blocks[*block].check_phi_use(var) {
-                            self.blocks[*block].add_to_live_out(var);
-                        }
-
-                        let def_v = self.definitions.get(var).unwrap_or_else(|| {
-                            panic!("Variable {var} was used, but not defined!")
-                        });
-
                         if !on_path.contains(block) {
                             return Err(format!("Variable {var} was used without being dominated by its definition"));
                         }
