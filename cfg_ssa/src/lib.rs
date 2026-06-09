@@ -3,6 +3,7 @@ pub mod types;
 pub mod type_checking;
 mod cfg_construction;
 mod ssa_destruction;
+mod tree_scan;
 mod cvm_emission;
 mod tests;
 
@@ -779,7 +780,9 @@ impl CFGList {
 
     pub fn destroy_ssa_all(&mut self) {
         for cfg in &mut self.cfgs {
-            cfg.destroy_ssa();
+            cfg.isolate_phis();
+            cfg.tree_scan_coloring();
+            cfg.destroy_cssa();
         }
     }
 

@@ -130,7 +130,7 @@ pub fn statement_to_cvm(stmt: &Statement) -> String {
 
 // --- Dominance computation (Cooper-Harvey-Kennedy) ---
 
-fn compute_idom(blocks: &[BasicBlock], entry: usize) -> Vec<Option<usize>> {
+pub(crate) fn compute_idom(blocks: &[BasicBlock], entry: usize) -> Vec<Option<usize>> {
     let n = blocks.len();
     let rpo = reverse_postorder(blocks, entry);
     let mut rpo_number = vec![0usize; n];
@@ -179,7 +179,7 @@ fn compute_idom(blocks: &[BasicBlock], entry: usize) -> Vec<Option<usize>> {
     idom
 }
 
-fn reverse_postorder(blocks: &[BasicBlock], entry: usize) -> Vec<usize> {
+pub(crate) fn reverse_postorder(blocks: &[BasicBlock], entry: usize) -> Vec<usize> {
     let n = blocks.len();
     let mut visited = vec![false; n];
     let mut order = Vec::with_capacity(n);
