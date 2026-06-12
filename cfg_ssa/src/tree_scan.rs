@@ -16,20 +16,20 @@ impl CFG {
         let idom = compute_idom(&self.blocks, self.entry);
         let children = build_dom_children(&idom, self.blocks.len(), self.entry);
 
-        // Step 2: Compute last-use information
-        let last_use_at = compute_last_uses(&self.blocks);
+        // Step 2: Compute liveness (live-on-edge semantics) and last-use information
+        let (live_in, live_out) = compute_fresh_live_out(&self.blocks);
+        let last_use_at = compute_last_uses(&self.blocks, &live_out);
 
         // Step 3: Run tree scan to assign colors
         let mut color: HashMap<String, usize> = HashMap::new();
         let mut num_colors: usize = 0;
-        let mut available = vec![true; 1024]; // assume enough colors
 
         assign_colors(
             self.entry,
-            &mut available,
             &self.blocks,
             &children,
             &last_use_at,
+            &live_in,
             &mut color,
             &mut num_colors,
         );
@@ -59,11 +59,10 @@ fn build_dom_children(idom: &[Option<usize>], n: usize, entry: usize) -> Vec<Vec
             }
         }
     }
-    // Sort children by RPO for deterministic traversal
     children
 }
 
-/// Compute fresh live_out sets via iterative backward dataflow analysis.
+/// Compute fresh (live_in, live_out) sets via iterative backward dataflow analysis.
 ///
 /// This operates directly on the current block structure (including any variables
 /// introduced by isolate_phis), rather than relying on the stale live_out sets
@@ -74,7 +73,9 @@ fn build_dom_children(idom: &[Option<usize>], n: usize, entry: usize) -> Vec<Vec
 ///   kill(B)     = variables defined in B (phi outputs + stmt outputs)
 ///   live_out(B) = union over successors S: (live_in(S) - phi_defs(S)) union phi_args_from(B, S)
 ///   live_in(B)  = gen(B) union (live_out(B) - kill(B))
-fn compute_fresh_live_out(blocks: &[crate::BasicBlock]) -> Vec<HashSet<String>> {
+fn compute_fresh_live_out(
+    blocks: &[crate::BasicBlock],
+) -> (Vec<HashSet<String>>, Vec<HashSet<String>>) {
     let n = blocks.len();
     let mut gen = vec![HashSet::new(); n];
     let mut kill = vec![HashSet::new(); n];
@@ -163,15 +164,16 @@ fn compute_fresh_live_out(blocks: &[crate::BasicBlock]) -> Vec<HashSet<String>> 
         }
     }
 
-    live_out
+    (live_in, live_out)
 }
 
 /// For each program point (block, stmt_index), compute which variables have their last use there.
 /// Uses a sentinel index: stmt_index == usize::MAX means "at the terminator / block exit".
 /// For phi arguments, the "use" is at the exit of the predecessor (live-on-edge semantics).
-fn compute_last_uses(blocks: &[crate::BasicBlock]) -> HashMap<(usize, usize), Vec<String>> {
-    let live_out = compute_fresh_live_out(blocks);
-
+fn compute_last_uses(
+    blocks: &[crate::BasicBlock],
+    live_out: &[HashSet<String>],
+) -> HashMap<(usize, usize), Vec<String>> {
     // Collect all use sites for each variable
     let mut all_uses: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
 
@@ -251,22 +253,33 @@ fn choose_color(available: &mut Vec<bool>, num_colors: &mut usize) -> usize {
 /// Recursive DFS on the dominance tree, assigning colors.
 fn assign_colors(
     block_id: usize,
-    available: &mut Vec<bool>,
     blocks: &[crate::BasicBlock],
     children: &[Vec<usize>],
     last_use_at: &HashMap<(usize, usize), Vec<String>>,
+    live_in: &[HashSet<String>],
     color: &mut HashMap<String, usize>,
     num_colors: &mut usize,
 ) {
     let block = &blocks[block_id];
 
-    // Process phi outputs (defined at block entry)
+    // Build this block's palette from its live-in set: a color is occupied iff some
+    // variable that is live at block entry holds it. Because a variable's live range is
+    // a subtree of the dominance tree, this makes the available set reflect exactly the
+    // variables whose live range contains this block. In particular, a variable that is
+    // live in a sibling subtree but dead here leaves its color free (unlike a naive
+    // inheritance of the immediate dominator's exit state). This is what guarantees the
+    // assignment uses no more than Maxlive = omega(G_I) colors.
+    let mut available = vec![true; 1024];
+    for var in &live_in[block_id] {
+        if let Some(&c) = color.get(var) {
+            available[c] = false;
+        }
+    }
+
+    // Process phi outputs, which are defined at block entry (their arguments are used at
+    // the predecessors' exits, so they are not freed here).
     for phi in &block.phi_functions {
-        // Free colors of phi arguments whose last use is at the entry of this block
-        // (phi args from predecessors with live-on-edge: they were marked at pred exit)
-        // Actually, phi args are used at predecessor exit, not here. So we don't free them here.
-        // The phi OUTPUT is defined here.
-        let c = choose_color(available, num_colors);
+        let c = choose_color(&mut available, num_colors);
         available[c] = false;
         color.insert(phi.output.clone(), c);
     }
@@ -287,7 +300,7 @@ fn assign_colors(
             // Only color if not already colored (might be pre-existing variable without
             // a definition in this block — shouldn't happen in SSA but defensive)
             if !color.contains_key(output) {
-                let c = choose_color(available, num_colors);
+                let c = choose_color(&mut available, num_colors);
                 available[c] = false;
                 color.insert(output.clone(), c);
             }
@@ -303,15 +316,15 @@ fn assign_colors(
         }
     }
 
-    // Recurse into dominance tree children with copies of available
+    // Recurse into the dominance-tree children. Each child rebuilds its own palette from
+    // its live-in set on entry, so no availability state is threaded down here.
     for &child in &children[block_id] {
-        let mut child_available = available.clone();
         assign_colors(
             child,
-            &mut child_available,
             blocks,
             children,
             last_use_at,
+            live_in,
             color,
             num_colors,
         );
