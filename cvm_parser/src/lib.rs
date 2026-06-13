@@ -225,6 +225,7 @@ enum ASTField {
     MainTemplate(String),
     ComponentsCreationMode(ComponentCreationMode),
     Witness(Vec<usize>),
+    Inputs(Vec<String>),
     Template(Template),
     Function(Function),
 }
@@ -237,6 +238,7 @@ fn parse_ast_field(input: &str) -> IResult<&str, ASTField> {
             map(parse_start, ASTField::MainTemplate),
             map(parse_components, ASTField::ComponentsCreationMode),
             map(parse_witness, ASTField::Witness),
+            map(parse_inputs, ASTField::Inputs),
             map(parse_function, ASTField::Function),
             map(parse_template, ASTField::Template),
     )))).parse(input)
@@ -252,6 +254,7 @@ pub fn parse_program(input: &str) -> IResult<&str, AST> {
     let mut main_template_opt: Option<String> = None;
     let mut components_creation_mode_opt: Option<ComponentCreationMode> = None;
     let mut witness: Option<Vec<usize>> = None;
+    let mut inputs_opt: Option<Vec<String>> = None;
     let mut templates: Vec<Template> = Vec::new();
     let mut functions: Vec<Function> = Vec::new();
 
@@ -295,6 +298,12 @@ pub fn parse_program(input: &str) -> IResult<&str, AST> {
                 }
                 witness = Some(vec);
             }
+            ASTField::Inputs(vec) => {
+                if inputs_opt.is_some() {
+                    return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail)));
+                }
+                inputs_opt = Some(vec);
+            }
             ASTField::Template(tem) => {
                 templates.push(tem);
             }
@@ -321,6 +330,7 @@ pub fn parse_program(input: &str) -> IResult<&str, AST> {
             main_template,
             components_creation_mode,
             witness,
+            inputs: inputs_opt,
             functions,
             templates,
         },

@@ -733,6 +733,7 @@ pub struct CFGList {
     main_template: String,
     components_creation_mode: ComponentCreationMode,
     witness: Vec<usize>,
+    inputs: Option<Vec<String>>,
 }
 
 impl CFGList {
@@ -747,6 +748,7 @@ impl CFGList {
         let main_template = ast.main_template.clone();
         let components_creation_mode = ast.components_creation_mode.clone();
         let witness = ast.witness.clone();
+        let inputs = ast.inputs.clone();
 
         for f in &ast.functions {
             metas.push(CfgMeta::Function {
@@ -775,7 +777,7 @@ impl CFGList {
             cfgs.push(CFG::new_from_template(t)?);
         }
 
-        Ok(Self { entry, cfgs, metas, prime, signals_memory, components_heap, main_template, components_creation_mode, witness })
+        Ok(Self { entry, cfgs, metas, prime, signals_memory, components_heap, main_template, components_creation_mode, witness, inputs })
     }
 
     pub fn destroy_ssa_all(&mut self) {
@@ -818,6 +820,14 @@ impl CFGList {
         out.push_str(&format!("%%components {}\n\n", mode));
         let witness_str: Vec<String> = self.witness.iter().map(|w| w.to_string()).collect();
         out.push_str(&format!("%%witness {}\n\n", witness_str.join(" ")));
+
+        if let Some(ref inputs) = self.inputs {
+            out.push_str(&format!("%%input {}\n", inputs.len()));
+            for input_line in inputs {
+                out.push_str(&format!("{}\n", input_line));
+            }
+            out.push('\n');
+        }
 
         for (cfg, meta) in self.cfgs.iter().zip(self.metas.iter()) {
             match meta {

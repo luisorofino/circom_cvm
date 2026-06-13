@@ -17,6 +17,7 @@ pub struct AST {
     pub main_template: String,
     pub components_creation_mode: ComponentCreationMode,
     pub witness: Vec<usize>,
+    pub inputs: Option<Vec<String>>,
     pub templates: Vec<Template>,
     pub functions: Vec<Function>,
 }

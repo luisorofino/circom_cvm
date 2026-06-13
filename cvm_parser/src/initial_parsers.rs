@@ -3,10 +3,10 @@ use num_bigint::BigInt;
 use nom::{
     branch::alt,
     bytes::tag,
-    character::complete::{digit1, space1, usize},
+    character::complete::{digit1, space1, usize, line_ending, not_line_ending},
     combinator::{map, value},
-    multi::separated_list1,
-    sequence::preceded,
+    multi::{separated_list1, count},
+    sequence::{preceded, terminated},
     IResult, Parser,
 };
 
@@ -58,6 +58,20 @@ pub fn parse_witness(input: &str) -> IResult<&str, Vec<usize>> {
         |witness: Vec<usize>| witness,
     )
     .parse(input)
+}
+
+pub fn parse_inputs(input: &str) -> IResult<&str, Vec<String>> {
+    let (input, _) = tag("%%input").parse(input)?;
+    let (input, _) = space1(input)?;
+    let (input, num_inputs) = usize(input)?;
+    let (input, _) = line_ending(input)?;
+
+    let (input, lines) = count(
+        terminated(map(not_line_ending, |s: &str| s.to_string()), line_ending),
+        num_inputs,
+    ).parse(input)?;
+
+    Ok((input, lines))
 }
 
 #[cfg(test)]
