@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use crate::CFG;
 use crate::cvm_emission::compute_idom;
-use crate::types::{get_variable_names, Expression, Atomic};
+use crate::types::{get_variable_names, Expression, Atomic, ConstantType, NumericType, Operator};
 
 impl CFG {
     /// Tree Scan register coloring (Rastello 2022, Algorithm 22.1).
@@ -20,9 +20,18 @@ impl CFG {
         let (live_in, live_out) = compute_fresh_live_out(&self.blocks);
         let last_use_at = compute_last_uses(&self.blocks, &live_out);
 
+        // Compute the numeric type (i64 / ff) of every SSA variable. The CVM has two
+        // disjoint register banks (Integer and FiniteField), so variables of different
+        // types must never share a color.
+        let var_type = compute_variable_types(&self.blocks);
+
         // Step 3: Run tree scan to assign colors
         let mut color: HashMap<String, usize> = HashMap::new();
         let mut num_colors: usize = 0;
+        // Records, for each color index, the type it has been reserved for. Once a color
+        // is used by a variable of a given type it stays reserved for that type, which
+        // keeps the two type-specific color sets disjoint.
+        let mut color_type: Vec<Option<NumericType>> = Vec::new();
 
         assign_colors(
             self.entry,
@@ -30,8 +39,10 @@ impl CFG {
             &children,
             &last_use_at,
             &live_in,
+            &var_type,
             &mut color,
             &mut num_colors,
+            &mut color_type,
         );
 
         // Step 4: Build renaming map (color -> canonical name)
@@ -233,21 +244,146 @@ fn compute_last_uses(
     result
 }
 
-/// Choose the first available color. If none available, extend the palette.
-fn choose_color(available: &mut Vec<bool>, num_colors: &mut usize) -> usize {
-    for (i, &avail) in available.iter().enumerate() {
-        if avail {
-            if i >= *num_colors {
-                *num_colors = i + 1;
-            }
-            return i;
+/// Compute the numeric type (Integer / FiniteField) of every SSA variable defined in
+/// the CFG. The type of a defined variable is read off its defining instruction; for
+/// identity copies (`x = y`) and phi functions the type is inherited from the source
+/// operands via a fixpoint, since those depend on other variables.
+fn compute_variable_types(blocks: &[crate::BasicBlock]) -> HashMap<String, NumericType> {
+    let mut types: HashMap<String, NumericType> = HashMap::new();
+    // (output, source) pairs for identity copies, resolved by propagation.
+    let mut copies: Vec<(String, String)> = Vec::new();
+    // (output, sources) for phi functions, resolved by propagation.
+    let mut phis: Vec<(String, Vec<String>)> = Vec::new();
+
+    for block in blocks {
+        for phi in &block.phi_functions {
+            let srcs = phi.possibilities.iter().map(|p| p.variable.clone()).collect();
+            phis.push((phi.output.clone(), srcs));
         }
+        for stmt in &block.statements {
+            let output = match &stmt.output {
+                Some(o) => o.clone(),
+                None => continue,
+            };
+            match statement_output_type(stmt) {
+                Some(StatementType::Known(t)) => { types.insert(output, t); }
+                Some(StatementType::CopyOf(src)) => { copies.push((output, src)); }
+                None => {}
+            }
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (out, src) in &copies {
+            if !types.contains_key(out) {
+                if let Some(t) = types.get(src).cloned() {
+                    types.insert(out.clone(), t);
+                    changed = true;
+                }
+            }
+        }
+        for (out, srcs) in &phis {
+            if !types.contains_key(out) {
+                if let Some(t) = srcs.iter().find_map(|s| types.get(s).cloned()) {
+                    types.insert(out.clone(), t);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    types
+}
+
+/// The type information that can be derived directly from a single statement.
+enum StatementType {
+    /// The output type is fully determined by the instruction.
+    Known(NumericType),
+    /// The statement is an identity copy `x = y`; its type equals that of `y`.
+    CopyOf(String),
+}
+
+/// Determine the numeric type of a statement's output from the statement alone,
+/// mirroring the rules in `type_checking.rs`.
+fn statement_output_type(stmt: &crate::Statement) -> Option<StatementType> {
+    stmt.output.as_ref()?;
+
+    if let Some(t) = &stmt.num_type {
+        return Some(StatementType::Known(t.clone()));
+    }
+
+    match &stmt.value.operator {
+        // Operators with no explicit type that nonetheless yield an Integer.
+        Some(Operator::GetTemplateId)
+        | Some(Operator::GetTemplateSignalPosition)
+        | Some(Operator::GetTemplateSignalSize)
+        | Some(Operator::GetTemplateSignalDim)
+        | Some(Operator::GetTemplateSignalType)
+        | Some(Operator::GetBusSignalPos)
+        | Some(Operator::GetBusSignalSize)
+        | Some(Operator::GetBusSignalDim)
+        | Some(Operator::GetBusSignalType) => {
+            Some(StatementType::Known(NumericType::Integer))
+        }
+        // Remaining typeless operators (e.g. GetSignal, GetCmpSignal) yield a FiniteField.
+        Some(_) => Some(StatementType::Known(NumericType::FiniteField)),
+        // Plain assignment `x = operand`: type comes from the operand.
+        None => match stmt.value.operands.first() {
+            Some(Expression::Atomic(Atomic::Constant(ConstantType::FF(_)))) => {
+                Some(StatementType::Known(NumericType::FiniteField))
+            }
+            Some(Expression::Atomic(Atomic::Constant(ConstantType::I64(_)))) => {
+                Some(StatementType::Known(NumericType::Integer))
+            }
+            Some(Expression::Atomic(Atomic::Variable(v))) => {
+                Some(StatementType::CopyOf(v.clone()))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// Choose the first available color compatible with `var_type`. A color is compatible
+/// when it has not yet been reserved for the other type. If none is available, extend
+/// the palette. The chosen color is (permanently) reserved for `var_type`.
+fn choose_color(
+    available: &mut Vec<bool>,
+    num_colors: &mut usize,
+    var_type: &NumericType,
+    color_type: &mut Vec<Option<NumericType>>,
+) -> usize {
+    for i in 0..available.len() {
+        if !available[i] {
+            continue;
+        }
+        // Skip colors already reserved for a different type.
+        if let Some(Some(t)) = color_type.get(i) {
+            if t != var_type {
+                continue;
+            }
+        }
+        if i >= *num_colors {
+            *num_colors = i + 1;
+        }
+        reserve_color(color_type, i, var_type);
+        return i;
     }
     // Extend palette
     let c = available.len();
     available.push(true);
     *num_colors = c + 1;
+    reserve_color(color_type, c, var_type);
     c
+}
+
+/// Reserve color index `c` for `var_type`, growing the reservation table as needed.
+fn reserve_color(color_type: &mut Vec<Option<NumericType>>, c: usize, var_type: &NumericType) {
+    if color_type.len() <= c {
+        color_type.resize(c + 1, None);
+    }
+    color_type[c] = Some(var_type.clone());
 }
 
 /// Recursive DFS on the dominance tree, assigning colors.
@@ -257,8 +393,10 @@ fn assign_colors(
     children: &[Vec<usize>],
     last_use_at: &HashMap<(usize, usize), Vec<String>>,
     live_in: &[HashSet<String>],
+    var_type: &HashMap<String, NumericType>,
     color: &mut HashMap<String, usize>,
     num_colors: &mut usize,
+    color_type: &mut Vec<Option<NumericType>>,
 ) {
     let block = &blocks[block_id];
 
@@ -279,7 +417,8 @@ fn assign_colors(
     // Process phi outputs, which are defined at block entry (their arguments are used at
     // the predecessors' exits, so they are not freed here).
     for phi in &block.phi_functions {
-        let c = choose_color(&mut available, num_colors);
+        let t = type_of(&phi.output, var_type);
+        let c = choose_color(&mut available, num_colors, &t, color_type);
         available[c] = false;
         color.insert(phi.output.clone(), c);
     }
@@ -300,7 +439,8 @@ fn assign_colors(
             // Only color if not already colored (might be pre-existing variable without
             // a definition in this block — shouldn't happen in SSA but defensive)
             if !color.contains_key(output) {
-                let c = choose_color(&mut available, num_colors);
+                let t = type_of(output, var_type);
+                let c = choose_color(&mut available, num_colors, &t, color_type);
                 available[c] = false;
                 color.insert(output.clone(), c);
             }
@@ -325,10 +465,18 @@ fn assign_colors(
             children,
             last_use_at,
             live_in,
+            var_type,
             color,
             num_colors,
+            color_type,
         );
     }
+}
+
+/// Look up a variable's numeric type, defaulting to FiniteField if it could not be
+/// inferred (should not happen for well-typed input).
+fn type_of(var: &str, var_type: &HashMap<String, NumericType>) -> NumericType {
+    var_type.get(var).cloned().unwrap_or(NumericType::FiniteField)
 }
 
 /// Apply the coloring: rename all variables and remove identity copies.
