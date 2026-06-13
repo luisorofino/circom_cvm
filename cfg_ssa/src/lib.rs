@@ -118,6 +118,11 @@ pub enum Successor {
         to: usize,
     },
     Conditional {
+        /// Numeric type of the branch (`ff.if` / `i64.if`), taken from the
+        /// original `IfThenElse` AST node. Stored explicitly because after SSA
+        /// destruction variable names are reused, so the condition's type can
+        /// no longer be recovered reliably by inspecting the variable's definition.
+        num_type: NumericType,
         condition: Expression,
         to_then: usize,
         to_else: usize,
@@ -215,7 +220,7 @@ impl BasicBlock {
     }
 
     fn change_condition(&mut self, target: &str, replacement: &str) {
-        if let Some(Successor::Conditional { condition, to_then: _, to_else: _ }) = &mut self.successors {
+        if let Some(Successor::Conditional { condition, .. }) = &mut self.successors {
             replace_variable_in_expression(condition, target, replacement);
         } else {
             panic!("Expected conditional successors");
@@ -360,10 +365,10 @@ impl CFG {
         }
     }
 
-    pub fn add_cond_link(&mut self, pred: usize, condition: Expression, to_then: usize, to_else: usize) {
+    pub fn add_cond_link(&mut self, pred: usize, num_type: NumericType, condition: Expression, to_then: usize, to_else: usize) {
         //do not overwrite existing successors
         if !self.check_existing_successor(pred) {
-            self.blocks[pred].add_succesor(Successor::Conditional { condition, to_then, to_else });
+            self.blocks[pred].add_succesor(Successor::Conditional { num_type, condition, to_then, to_else });
             self.blocks[to_then].add_predecessor(pred);
             self.blocks[to_else].add_predecessor(pred);
         }
@@ -578,7 +583,7 @@ impl CFG {
                     Successor::Unconditional { to } => {
                         dot.push_str(&format!("  {} -> {};\n", block.id, to));
                     }
-                    Successor::Conditional { condition, to_then, to_else } => {
+                    Successor::Conditional { condition, to_then, to_else, .. } => {
                         let cond = esc(&format!("{:?}", condition));
                         dot.push_str(&format!(
                                 "  {} -> {} [label=\"{} != 0\"];\n",
@@ -684,7 +689,7 @@ impl CFG {
                     Successor::Unconditional { to } => {
                         dot.push_str(&format!("  {} -> {};\n", block.id, to));
                     }
-                    Successor::Conditional { condition, to_then, to_else } => {
+                    Successor::Conditional { condition, to_then, to_else, .. } => {
                         let cond = esc(&format!("{:?}", condition));
                         dot.push_str(&format!(
                                 "  {} -> {} [label=\"{} != 0\"];\n",

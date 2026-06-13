@@ -289,10 +289,10 @@ impl<'a> CfgConstructor<'a> {
                     self.handle_operation(curr, num_type, operator, output, operands)?
                 }
                 ASTNode::Loop { body: loop_body } => self.handle_loop(loop_body, curr)?,
-                ASTNode::IfThenElse { num_type: _, condition, if_case, else_case } => {
+                ASTNode::IfThenElse { num_type, condition, if_case, else_case } => {
                     let cond = self.read_expression(condition, curr)?;
                     self.track_use_condition(&cond, curr)?;
-                    self.handle_if(&cond, if_case, else_case, curr, loop_blocks)?
+                    self.handle_if(num_type, &cond, if_case, else_case, curr, loop_blocks)?
                 }
                 ASTNode::Break => {
                     let out = loop_blocks.expect("break outside loop").1;
@@ -411,6 +411,7 @@ impl<'a> CfgConstructor<'a> {
 
     fn handle_if(
         &mut self,
+        num_type: &crate::types::NumericType,
         condition: &Expression,
         if_case: &[ASTNode],
         else_case: &Option<Vec<ASTNode>>,
@@ -429,7 +430,7 @@ impl<'a> CfgConstructor<'a> {
                             else { join };
 
         // Link current block with the then and else blocks
-        self.cfg.add_cond_link(curr, condition.clone(), then_b, else_b);
+        self.cfg.add_cond_link(curr, num_type.clone(), condition.clone(), then_b, else_b);
 
         // Seal the blocks that start then and else
         self.seal_block(then_b)?;

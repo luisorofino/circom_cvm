@@ -348,45 +348,6 @@ impl<'a> Emitter<'a> {
         visited
     }
 
-    fn condition_type(cond: &Expression, blocks: &[BasicBlock]) -> &'static str {
-        if let Expression::Atomic(Atomic::Variable(var)) = cond {
-            return Self::trace_type(var, blocks);
-        }
-        "ff"
-    }
-
-    fn trace_type(var: &str, blocks: &[BasicBlock]) -> &'static str {
-        let mut current = var.to_string();
-        'outer: for _ in 0..50 {
-            for b in blocks {
-                for stmt in &b.statements {
-                    if stmt.output.as_deref() == Some(current.as_str()) {
-                        match &stmt.num_type {
-                            Some(NumericType::Integer) => return "i64",
-                            Some(NumericType::FiniteField) => return "ff",
-                            None => {
-                                if stmt.value.operator.is_none() {
-                                    match stmt.value.operands.first() {
-                                        Some(Expression::Atomic(Atomic::Variable(src))) => {
-                                            current = src.clone();
-                                            continue 'outer;
-                                        }
-                                        Some(Expression::Atomic(Atomic::Constant(ConstantType::I64(_)))) => return "i64",
-                                        Some(Expression::Atomic(Atomic::Constant(ConstantType::FF(_)))) => return "ff",
-                                        _ => {}
-                                    }
-                                }
-                                return "ff";
-                            }
-                        }
-                    }
-                }
-            }
-            break;
-        }
-        "ff"
-    }
-
     fn emit_block(&mut self, block_id: usize, loop_header: Option<usize>, loop_exit: Option<usize>, visited: &mut HashSet<usize>) {
         if visited.contains(&block_id) {
             return;
@@ -420,8 +381,11 @@ impl<'a> Emitter<'a> {
                     self.emit_block(to, loop_header, loop_exit, visited);
                 }
             }
-            Some(Successor::Conditional { condition, to_then, to_else }) => {
-                let ctype = Self::condition_type(&condition, self.blocks);
+            Some(Successor::Conditional { num_type, condition, to_then, to_else }) => {
+                let ctype = match num_type {
+                    NumericType::Integer => "i64",
+                    NumericType::FiniteField => "ff",
+                };
                 let cond_str = expression_to_cvm(&condition);
                 self.emit_line(&format!("{}.if {}", ctype, cond_str));
                 self.indent += 1;
