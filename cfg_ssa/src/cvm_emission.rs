@@ -254,16 +254,38 @@ fn find_loops(blocks: &[BasicBlock], idom: &[Option<usize>]) -> Vec<LoopInfo> {
             }
         }
 
+        // The loop exit is the block control transfers to when the loop terminates
+        // normally: the loop header's successor that lies outside the body (circom loops
+        // test their condition at the header). Scanning every body block for an out-of-body
+        // successor was both ambiguous —an `assert`/`error` block inside the body also
+        // leaves the loop— and order-dependent (it iterated a HashSet and kept the *last*
+        // candidate), which could misplace the `break` and corrupt the emitted control flow.
         let mut exit = header;
-        for &b in &body {
-            if let Some(succ) = &blocks[b].successors {
-                let targets: Vec<usize> = match succ {
-                    Successor::Unconditional { to } => vec![*to],
-                    Successor::Conditional { to_then, to_else, .. } => vec![*to_then, *to_else],
-                };
-                for &t in &targets {
-                    if !body.contains(&t) {
-                        exit = t;
+        match &blocks[header].successors {
+            Some(Successor::Conditional { to_then, to_else, .. }) => {
+                if !body.contains(to_then) {
+                    exit = *to_then;
+                } else if !body.contains(to_else) {
+                    exit = *to_else;
+                }
+            }
+            _ => {
+                // Fallback: header is not a conditional. Pick the out-of-body successor
+                // deterministically (smallest block id over body blocks visited in order).
+                let mut sorted: Vec<usize> = body.iter().copied().collect();
+                sorted.sort_unstable();
+                'outer: for b in sorted {
+                    if let Some(succ) = &blocks[b].successors {
+                        let targets: Vec<usize> = match succ {
+                            Successor::Unconditional { to } => vec![*to],
+                            Successor::Conditional { to_then, to_else, .. } => vec![*to_then, *to_else],
+                        };
+                        for t in targets {
+                            if !body.contains(&t) {
+                                exit = t;
+                                break 'outer;
+                            }
+                        }
                     }
                 }
             }
@@ -292,7 +314,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_line(&mut self, line: &str) {
-        for _ in 0..self.indent { self.output.push_str("  "); }
+        // NOTE: no leading indentation is emitted. The CVM consumer (cvm-compile /
+        // circom-witnesscalc) rejects any leading whitespace on a line ("invalid line"),
+        // so block bodies must start at column 0 even inside `ff.if` / `loop` blocks.
+        // `self.indent` is kept (and still tracked) only as potential structural metadata.
         self.output.push_str(line);
         self.output.push('\n');
     }

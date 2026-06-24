@@ -45,9 +45,13 @@ impl CFG {
             &mut color_type,
         );
 
-        // Step 4: Build renaming map (color -> canonical name)
+        // Step 4: Build renaming map (color -> canonical name). Iterate the variables in a
+        // deterministic (sorted) order so the representative name chosen for each color does
+        // not depend on HashMap iteration order, making the emitted code reproducible.
         let mut color_to_name: HashMap<usize, String> = HashMap::new();
-        for (var, &c) in &color {
+        let mut sorted_vars: Vec<(&String, usize)> = color.iter().map(|(v, &c)| (v, c)).collect();
+        sorted_vars.sort();
+        for (var, c) in sorted_vars {
             color_to_name.entry(c).or_insert_with(|| var.clone());
         }
         let rename: HashMap<String, String> = color.iter()
