@@ -297,6 +297,88 @@ fn find_loops(blocks: &[BasicBlock], idom: &[Option<usize>]) -> Vec<LoopInfo> {
     loops
 }
 
+/// Immediate post-dominators, computed as dominators on the reverse CFG with a single
+/// virtual exit node `n` (every sink block flows to it). `ipostdom[b]` is the immediate
+/// post-dominator of block `b`; it may equal `n` (the virtual exit), meaning "no real merge
+/// point — every path out of `b` leaves the function". Used to find the join of a conditional
+/// (its immediate post-dominator), which is exact, unlike a reachability heuristic.
+pub(crate) fn compute_ipostdom(blocks: &[BasicBlock]) -> Vec<usize> {
+    let n = blocks.len();
+    let exit = n; // virtual unique exit
+    let total = n + 1;
+
+    let fsucc = |b: usize| -> Vec<usize> {
+        if b == exit { return vec![]; }
+        match &blocks[b].successors {
+            Some(Successor::Unconditional { to }) => vec![*to],
+            Some(Successor::Conditional { to_then, to_else, .. }) => vec![*to_then, *to_else],
+            None => vec![exit],
+        }
+    };
+
+    // Reverse-graph successors of x = forward predecessors of x.
+    let mut rsucc: Vec<Vec<usize>> = vec![Vec::new(); total];
+    for b in 0..n {
+        for s in fsucc(b) {
+            rsucc[s].push(b);
+        }
+    }
+
+    // Reverse postorder of the reverse graph from the virtual exit.
+    fn dfs(x: usize, rsucc: &[Vec<usize>], visited: &mut [bool], order: &mut Vec<usize>) {
+        visited[x] = true;
+        for &s in &rsucc[x] {
+            if !visited[s] { dfs(s, rsucc, visited, order); }
+        }
+        order.push(x);
+    }
+    let mut visited = vec![false; total];
+    let mut order = Vec::with_capacity(total);
+    dfs(exit, &rsucc, &mut visited, &mut order);
+    order.reverse();
+    let rpo = order;
+    let mut rpo_number = vec![usize::MAX; total];
+    for (i, &b) in rpo.iter().enumerate() {
+        rpo_number[b] = i;
+    }
+
+    let mut idom: Vec<Option<usize>> = vec![None; total];
+    idom[exit] = Some(exit);
+
+    let intersect = |mut a: usize, mut b: usize, idom: &[Option<usize>]| -> usize {
+        while a != b {
+            while rpo_number[a] > rpo_number[b] { a = idom[a].unwrap(); }
+            while rpo_number[b] > rpo_number[a] { b = idom[b].unwrap(); }
+        }
+        a
+    };
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in &rpo {
+            if b == exit { continue; }
+            // Predecessors of b in the reverse graph = forward successors of b.
+            let mut new_idom: Option<usize> = None;
+            for p in fsucc(b) {
+                if rpo_number[p] == usize::MAX { continue; }
+                if idom[p].is_some() {
+                    new_idom = Some(match new_idom {
+                        None => p,
+                        Some(cur) => intersect(cur, p, &idom),
+                    });
+                }
+            }
+            if new_idom.is_some() && new_idom != idom[b] {
+                idom[b] = new_idom;
+                changed = true;
+            }
+        }
+    }
+
+    (0..n).map(|b| idom[b].unwrap_or(exit)).collect()
+}
+
 // --- Structural walk: CFG → CVM body ---
 
 #[allow(dead_code)]
@@ -304,13 +386,22 @@ struct Emitter<'a> {
     blocks: &'a [BasicBlock],
     loops: &'a [LoopInfo],
     idom: &'a [Option<usize>],
+    ipostdom: Vec<usize>,
     indent: usize,
     output: String,
 }
 
 impl<'a> Emitter<'a> {
     fn new(blocks: &'a [BasicBlock], loops: &'a [LoopInfo], idom: &'a [Option<usize>]) -> Self {
-        Self { blocks, loops, idom, indent: 0, output: String::new() }
+        let ipostdom = compute_ipostdom(blocks);
+        Self { blocks, loops, idom, ipostdom, indent: 0, output: String::new() }
+    }
+
+    /// Structural join of the conditional at `block_id`: its immediate post-dominator,
+    /// or `None` when that is the virtual exit (no real merge point).
+    fn join_of(&self, block_id: usize) -> Option<usize> {
+        let j = self.ipostdom[block_id];
+        if j >= self.blocks.len() { None } else { Some(j) }
     }
 
     fn emit_line(&mut self, line: &str) {
@@ -336,21 +427,6 @@ impl<'a> Emitter<'a> {
     #[allow(dead_code)]
     fn find_containing_loop(&self, block: usize) -> Option<usize> {
         self.loops.iter().position(|l| l.body.contains(&block))
-    }
-
-    fn find_join(&self, then_b: usize, else_b: usize) -> Option<usize> {
-        let then_forward = self.collect_reachable_forward(then_b);
-        let else_forward = self.collect_reachable_forward(else_b);
-
-        let rpo = reverse_postorder(self.blocks, 0);
-        for &b in &rpo {
-            if b == then_b || b == else_b { continue; }
-            if then_forward.contains(&b) && else_forward.contains(&b) {
-                return Some(b);
-            }
-        }
-
-        None
     }
 
     fn collect_reachable_forward(&self, start: usize) -> HashSet<usize> {
@@ -415,7 +491,14 @@ impl<'a> Emitter<'a> {
                 self.emit_line(&format!("{}.if {}", ctype, cond_str));
                 self.indent += 1;
 
-                let join = self.find_join(to_then, to_else);
+                // The structural join is the conditional's immediate post-dominator. A join
+                // that coincides with the enclosing loop's exit or header is not an inline
+                // continuation (it is handled by the loop's `break`/`continue` machinery), so
+                // it is treated as "no join" here.
+                let join = match self.join_of(block_id) {
+                    Some(j) if Some(j) == loop_exit || Some(j) == loop_header => None,
+                    other => other,
+                };
                 if let Some(j) = join {
                     visited.insert(j);
                 }
